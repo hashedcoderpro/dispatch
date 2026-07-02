@@ -1,0 +1,12 @@
+node_modules/
+data.sqlite
+data.sqlite-*
+data.sqlite-journal
+.env
+.env.*
+*.log
+.DS_Store
+Thumbs.db
+
+# Duplicate copy from original zip — app lives at repo root
+vacotel-sms-app/

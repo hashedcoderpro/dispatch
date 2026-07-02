@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Dispatch — SMS Campaign Manager</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div class="shell">
+  <div class="sidebar">
+    <div class="brand">
+      <div class="brand-mark">
+        <span class="bars"><span></span><span></span><span></span><span></span></span>
+        Dispatch
+      </div>
+      <div class="brand-sub">Vacotel SMS Console</div>
+    </div>
+    <div class="nav">
+      <button class="nav-item active" data-page="dashboard"><span class="dot"></span>Dashboard</button>
+      <button class="nav-item" data-page="send"><span class="dot"></span>Send SMS</button>
+      <button class="nav-item" data-page="campaigns"><span class="dot"></span>Launch Campaign</button>
+      <button class="nav-item" data-page="leads"><span class="dot"></span>Lead Lists</button>
+      <button class="nav-item" data-page="messages"><span class="dot"></span>Message Rosters</button>
+      <button class="nav-item" data-page="reports"><span class="dot"></span>Reports</button>
+      <button class="nav-item" data-page="settings"><span class="dot"></span>Settings</button>
+    </div>
+    <div class="sidebar-footer">
+      <div id="sidebarMode" class="mode-pill mode-test" style="display:none;">TEST MODE</div>
+      <div class="balance-pill">
+        <div>
+          <div class="label">Balance</div>
+          <div class="amount" id="sidebarBalance">$0.00</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="main">
+    <div id="testModeBanner" class="test-mode-banner" style="display:none;">
+      <strong>Test mode is on</strong> — SMS are simulated locally and never sent to Vacotel. Uncheck Test mode in Settings, click Save, then send again.
+    </div>
+
+    <!-- DASHBOARD -->
+    <div class="page active" id="page-dashboard">
+      <div class="page-header">
+        <div>
+          <h1>Dashboard</h1>
+          <p>Account overview and delivery performance across all campaigns.</p>
+        </div>
+      </div>
+      <div class="grid cols-4" id="dashStats"></div>
+      <div class="section-title">Error breakdown (failed API sends)</div>
+      <div class="table-wrap"><table id="errorTable"><thead><tr><th>Code</th><th>Meaning</th><th>Count</th></tr></thead><tbody></tbody></table></div>
+    </div>
+
+    <!-- SEND SMS -->
+    <div class="page" id="page-send">
+      <div class="page-header">
+        <div>
+          <h1>Send SMS</h1>
+          <p>Quick send — one SID, numbers × messages. Each number gets every message (1×1=1 SMS, 3×5=15 SMS).</p>
+        </div>
+      </div>
+      <div class="grid cols-2">
+        <div class="card">
+          <div class="section-title" style="margin-top:0;">Recipients</div>
+          <label>Send to (one number per line)</label>
+          <textarea id="qsNumbers" placeholder="15551234567&#10;15559876543" oninput="updateQuickSendCount()"></textarea>
+          <label>Sender ID (SID)</label>
+          <input type="text" id="qsSource" placeholder="e.g. YourBrand">
+        </div>
+        <div class="card">
+          <div class="section-title" style="margin-top:0;">Content</div>
+          <label>Message (single message — or leave blank if uploading a file)</label>
+          <textarea id="qsMessage" placeholder="Your SMS text here..." oninput="updateQuickSendCount()"></textarea>
+          <div class="file-drop" onclick="document.getElementById('qsMessageFile').click()">
+            <div id="qsMessageFileLabel">Or upload .txt / .csv — one message per line</div>
+            <input type="file" id="qsMessageFile" accept=".csv,.txt" onchange="onQsMessageFile(this)">
+          </div>
+        </div>
+      </div>
+      <div class="card" style="margin-top:14px;">
+        <div class="flex-between">
+          <div>
+            <span class="tag" id="qsCountTag">0 numbers × 0 messages = 0 SMS</span>
+            <span class="muted" style="margin-left:10px;" id="qsCostHint"></span>
+          </div>
+          <div style="display:flex; gap:8px;">
+            <button class="btn-secondary" onclick="previewQuickSend()">Preview</button>
+            <button class="btn-primary" onclick="sendQuickSms()">Send now</button>
+          </div>
+        </div>
+        <div id="qsPreviewWrap" style="margin-top:14px;"></div>
+      </div>
+    </div>
+
+    <!-- CAMPAIGNS / LAUNCH -->
+    <div class="page" id="page-campaigns">
+      <div class="page-header">
+        <div>
+          <h1>Launch Campaign</h1>
+          <p>Upload lead lists per client/SID, share one message roster, and send with proportional interleaving.</p>
+        </div>
+      </div>
+
+      <div class="card" style="margin-bottom:20px;">
+        <div class="section-title" style="margin-top:0;">Campaign setup</div>
+        <label>Campaign name</label>
+        <input type="text" id="launchName" placeholder="e.g. July multi-client blast">
+        <label>Messages — paste below, upload a file, or pick a saved roster</label>
+        <textarea id="launchMessages" placeholder="Hi {name}, following up...&#10;Hey {name} — quick note..." style="min-height:100px;"></textarea>
+        <div class="field-row">
+          <div class="file-drop" onclick="document.getElementById('launchMessageFile').click()" style="margin-bottom:0;">
+            <div id="launchMessageFileLabel">Upload message file (.txt/.csv)</div>
+            <input type="file" id="launchMessageFile" accept=".csv,.txt" onchange="document.getElementById('launchMessageFileLabel').textContent=this.files[0]?.name||'Upload message file'">
+          </div>
+          <div>
+            <label>Or use saved roster</label>
+            <select id="launchRosterId"><option value="">— create from above —</option></select>
+          </div>
+        </div>
+        <div class="field-row">
+          <div>
+            <label>Rotation</label>
+            <select id="launchRotation">
+              <option value="sequential">Sequential (round-robin)</option>
+              <option value="random">Random</option>
+            </select>
+          </div>
+          <div>
+            <label>Cost per SMS segment ($)</label>
+            <input type="number" id="launchRate" step="0.001" placeholder="from settings">
+            <p class="hint" style="margin-top:-8px;">Deducted from your balance per segment sent. Leave blank to use Settings default. A 161-char GSM message = 2 segments.</p>
+          </div>
+          <div>
+            <label>Throttle — delay between sends (ms)</label>
+            <input type="number" id="launchThrottle" value="300">
+            <p class="hint" style="margin-top:-8px;">Pause between each SMS. 300ms ≈ 3/sec. Higher = slower but gentler on carriers/API.</p>
+          </div>
+        </div>
+
+        <div class="section-title">Client segments <button class="btn-secondary" style="margin-left:8px; padding:4px 10px; font-size:11px;" onclick="addLaunchSegment()">+ Add client</button></div>
+        <p class="hint" style="margin-top:0;">Each segment = one client with their own SID and lead list. Sends interleave proportionally (1k + 2k → A, B, B, A, B, B…).</p>
+        <div id="launchSegments"></div>
+
+        <div class="flex-between" style="margin-top:8px;">
+          <span class="tag" id="launchCountTag">0 leads across 0 segments</span>
+          <button class="btn-primary" onclick="launchCampaign()">Create campaign</button>
+        </div>
+      </div>
+
+      <div class="section-title">Past campaigns</div>
+      <div id="campaignList"></div>
+    </div>
+
+    <!-- LEADS -->
+    <div class="page" id="page-leads">
+      <div class="page-header">
+        <div>
+          <h1>Lead Lists</h1>
+          <p>Upload a CSV of 500–1,000 contacts. We auto-detect phone, name, and custom columns.</p>
+        </div>
+        <button class="btn-primary" onclick="openModal('modal-upload-leads')">+ Upload list</button>
+      </div>
+      <div id="leadLists"></div>
+    </div>
+
+    <!-- MESSAGES -->
+    <div class="page" id="page-messages">
+      <div class="page-header">
+        <div>
+          <h1>Message Rosters</h1>
+          <p>A pool of 50–100 message variants that rotate across a send, so contacts don't all get identical text.</p>
+        </div>
+        <button class="btn-primary" onclick="openModal('modal-upload-roster')">+ New roster</button>
+      </div>
+      <div id="rosterLists"></div>
+    </div>
+
+    <!-- REPORTS -->
+    <div class="page" id="page-reports">
+      <div class="page-header">
+        <div><h1>Reports</h1><p>Deliverability across every campaign. Pick a campaign for message-level detail.</p></div>
+      </div>
+      <div class="grid cols-4" id="reportStats"></div>
+      <div class="section-title">Campaigns</div>
+      <div class="table-wrap"><table id="reportTable">
+        <thead><tr><th>Campaign</th><th>Sent</th><th>Delivered</th><th>Failed</th><th>Spend</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table></div>
+    </div>
+
+    <!-- SETTINGS -->
+    <div class="page" id="page-settings">
+      <div class="page-header"><div><h1>Settings</h1><p>Vacotel API credentials and billing rate.</p></div></div>
+
+      <div class="card" style="max-width:480px;">
+        <div class="section-title" style="margin-top:0;">API connection</div>
+        <label>Base URL</label>
+        <input type="text" id="setBaseUrl" placeholder="http://api.vacotel.net">
+        <label>Username</label>
+        <input type="text" id="setUsername" placeholder="Vacotel account username">
+        <label>Password</label>
+        <input type="password" id="setPassword" placeholder="Leave blank to keep current password">
+        <label style="display:flex; align-items:center; gap:8px; margin-bottom:14px;">
+          <input type="checkbox" id="setTestMode" style="width:auto; margin:0;"> Test mode (simulate sends, no real SMS or cost)
+        </label>
+        <p class="hint" style="margin-top:0;">Vacotel uses <strong>Username</strong> and <strong>Password</strong> HTTP headers only — no API key or integration name required for this API.</p>
+        <button class="btn-primary" onclick="saveSettings()">Save settings</button>
+        <button class="btn-secondary" style="margin-left:8px;" onclick="testVacotelConnection()">Test Vacotel connection</button>
+      </div>
+
+      <div class="card" style="max-width:480px; margin-top:16px;">
+        <div class="section-title" style="margin-top:0;">Billing defaults</div>
+        <label>Default cost per SMS segment ($)</label>
+        <input type="number" id="setDefaultRate" step="0.001" placeholder="0.01">
+        <p class="hint" style="margin-top:0;">Used as the default rate for Send SMS and Launch Campaign. Actual cost = segments × this rate (Unicode messages may use multiple segments).</p>
+      </div>
+
+      <div class="card" style="max-width:480px; margin-top:16px;">
+        <div class="section-title" style="margin-top:0;">Balance top-up</div>
+        <p class="hint" style="margin-top:0;">Vacotel's API doesn't expose an account balance, so balance is tracked manually here and auto-deducted per send using each campaign's rate.</p>
+        <div class="field-row">
+          <div><label>Add amount ($)</label><input type="number" id="topupAmount" step="0.01" placeholder="100.00"></div>
+          <div><label>Note</label><input type="text" id="topupNote" placeholder="e.g. July top-up"></div>
+        </div>
+        <button class="btn-primary" onclick="topupBalance()">Add to balance</button>
+        <div class="section-title">Recent transactions</div>
+        <div class="table-wrap"><table id="txTable"><thead><tr><th>Date</th><th>Amount</th><th>Note</th></tr></thead><tbody></tbody></table></div>
+      </div>
+
+      <div class="card" style="max-width:480px; margin-top:16px;">
+        <div class="section-title" style="margin-top:0;">DLR webhook</div>
+        <p class="hint" style="margin-top:0;">Give this URL to Vacotel as your DLR push endpoint (needs to be publicly reachable — see README for a tunnel option during testing):</p>
+        <input type="text" class="mono" readonly id="dlrUrl" onclick="this.select()">
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- MODAL: upload leads -->
+<div class="modal-overlay" id="modal-upload-leads" style="display:none;">
+  <div class="modal">
+    <h2>Upload lead list</h2>
+    <label>List name</label>
+    <input type="text" id="leadListName" placeholder="e.g. July prospects batch 1">
+    <label>CSV file</label>
+    <div class="file-drop" onclick="document.getElementById('leadFileInput').click()">
+      <div id="leadFileLabel">Click to choose a CSV (phone, name, and optional custom columns)</div>
+      <input type="file" id="leadFileInput" accept=".csv" onchange="document.getElementById('leadFileLabel').textContent=this.files[0]?.name || 'Click to choose a CSV'">
+    </div>
+    <p class="hint">Expected columns: a phone/mobile/destination column (required), plus optional name, custom1, custom2. Header names are matched flexibly.</p>
+    <div class="flex-between">
+      <button class="btn-secondary" onclick="closeModal('modal-upload-leads')">Cancel</button>
+      <button class="btn-primary" onclick="uploadLeads()">Upload</button>
+    </div>
+  </div>
+</div>
+
+<!-- MODAL: upload roster -->
+<div class="modal-overlay" id="modal-upload-roster" style="display:none;">
+  <div class="modal">
+    <h2>New message roster</h2>
+    <label>Roster name</label>
+    <input type="text" id="rosterName" placeholder="e.g. Q3 outreach variants">
+    <label>Messages (one per line, 50–100 recommended)</label>
+    <textarea id="rosterTextarea" style="min-height:160px;" placeholder="Hi {name}, following up on your account {phone}...&#10;Hey {name} — quick note about your account...&#10;..."></textarea>
+    <p class="hint">Use {name}, {phone}, {custom1}, {custom2} — filled in per contact. Or click below to upload a .txt/.csv instead.</p>
+    <div class="file-drop" onclick="document.getElementById('rosterFileInput').click()">
+      <div id="rosterFileLabel">Or click to upload a .txt/.csv (one message per line)</div>
+      <input type="file" id="rosterFileInput" accept=".csv,.txt" onchange="document.getElementById('rosterFileLabel').textContent=this.files[0]?.name || 'Or click to upload a .txt/.csv'">
+    </div>
+    <div class="flex-between">
+      <button class="btn-secondary" onclick="closeModal('modal-upload-roster')">Cancel</button>
+      <button class="btn-primary" onclick="createRoster()">Save roster</button>
+    </div>
+  </div>
+</div>
+
+<!-- MODAL: new campaign -->
+<div class="modal-overlay" id="modal-new-campaign" style="display:none;">
+  <div class="modal">
+    <h2>New campaign</h2>
+    <label>Campaign name</label>
+    <input type="text" id="campName" placeholder="e.g. July prospects — outreach v1">
+    <label>Lead list</label>
+    <select id="campListId"></select>
+    <label>Message roster</label>
+    <select id="campRosterId"></select>
+    <label>Sender ID (source)</label>
+    <input type="text" id="campSource" placeholder="e.g. YourBrand">
+    <div class="field-row">
+      <div>
+        <label>Rotation</label>
+        <select id="campRotation">
+          <option value="sequential">Sequential (round-robin)</option>
+          <option value="random">Random</option>
+        </select>
+      </div>
+      <div>
+        <label>Rate per SMS segment ($)</label>
+        <input type="number" id="campRate" step="0.001" value="0">
+      </div>
+    </div>
+    <label>Throttle between sends (ms)</label>
+    <input type="number" id="campThrottle" value="300">
+    <p class="hint">Higher throttle = slower but gentler on the API / less likely to trip carrier spam filters.</p>
+    <div class="flex-between">
+      <button class="btn-secondary" onclick="closeModal('modal-new-campaign')">Cancel</button>
+      <button class="btn-primary" onclick="createCampaign()">Create campaign</button>
+    </div>
+  </div>
+</div>
+
+<!-- MODAL: campaign detail -->
+<div class="modal-overlay" id="modal-campaign-detail" style="display:none;">
+  <div class="modal" style="width:720px;">
+    <h2 id="cdTitle">Campaign</h2>
+    <div class="grid cols-3" id="cdStats" style="margin-bottom:16px;"></div>
+    <div id="cdPreviewWrap"></div>
+    <div class="flex-between" style="margin-top:16px;">
+      <button class="btn-secondary" onclick="closeModal('modal-campaign-detail')">Close</button>
+      <div style="display:flex; gap:8px;">
+        <button class="btn-secondary" id="cdExportBtn">Export CSV</button>
+        <button class="btn-primary" id="cdSendBtn" onclick="sendCampaign()">Preview & Send</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="toastHost"></div>
+
+<script src="app.js"></script>
+</body>
+</html>
