@@ -3,7 +3,7 @@ const multer = require('multer');
 const { parse } = require('csv-parse/sync');
 const path = require('path');
 const db = require('./db');
-const { sendSms, analyzeMessage, normalizeDestination, ERROR_CODES, DLR_STATUS } = require('./vacotelClient');
+const { sendSms, analyzeMessage, normalizeDestination, probeVacotelApi, ERROR_CODES, DLR_STATUS } = require('./vacotelClient');
 const {
   parseLines, parsePhones, buildInterleavedQueue, buildCartesianQueue, assignTemplates, estimateCost
 } = require('./sendHelpers');
@@ -11,8 +11,33 @@ const {
 const app = express();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
 
+const AUTH_USER = process.env.DISPATCH_USER || '';
+const AUTH_PASS = process.env.DISPATCH_PASSWORD || '';
+const AUTH_ENABLED = Boolean(AUTH_USER && AUTH_PASS);
+
+function basicAuth(req, res, next) {
+  if (!AUTH_ENABLED || req.path === '/api/dlr') return next();
+
+  const header = req.headers.authorization;
+  if (!header || !header.startsWith('Basic ')) {
+    res.set('WWW-Authenticate', 'Basic realm="Dispatch"');
+    return res.status(401).send('Authentication required');
+  }
+
+  const decoded = Buffer.from(header.slice(6), 'base64').toString();
+  const sep = decoded.indexOf(':');
+  const user = sep >= 0 ? decoded.slice(0, sep) : decoded;
+  const pass = sep >= 0 ? decoded.slice(sep + 1) : '';
+
+  if (user === AUTH_USER && pass === AUTH_PASS) return next();
+
+  res.set('WWW-Authenticate', 'Basic realm="Dispatch"');
+  return res.status(401).send('Invalid credentials');
+}
+
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+app.use(basicAuth);
 app.use(express.static(path.join(__dirname, 'public')));
 
 // ---------- helpers ----------
@@ -94,6 +119,7 @@ async function processSendQueue({ queue, campaignId, ratePerSms, throttleMs, get
   const baseUrl = getSetting('vacotel_base_url');
   const username = getSetting('vacotel_username');
   const password = getSetting('vacotel_password');
+  const apiId = getSetting('vacotel_api_id');
   const testMode = getSetting('test_mode') === '1';
 
   const insertSend = db.prepare(`
@@ -111,7 +137,7 @@ async function processSendQueue({ queue, campaignId, ratePerSms, throttleMs, get
 
     let result;
     try {
-      result = await sendSms({ baseUrl, username, password, destination: phone, source, text, dataCoding, testMode });
+      result = await sendSms({ baseUrl, username, password, apiId, destination: phone, source, text, dataCoding, testMode });
     } catch (e) {
       result = { ok: false, errorCode: -10, errorDescription: 'Network/request error: ' + e.message };
     }
@@ -145,22 +171,24 @@ app.get('/api/settings', (req, res) => {
     vacotel_base_url: getSetting('vacotel_base_url'),
     vacotel_username: getSetting('vacotel_username'),
     has_password: !!getSetting('vacotel_password'),
+    has_api_id: !!getSetting('vacotel_api_id'),
     test_mode: getSetting('test_mode') === '1',
     default_rate_per_sms: parseFloat(getSetting('default_rate_per_sms') || '0') || 0
   });
 });
 
 app.post('/api/settings', (req, res) => {
-  const { vacotel_base_url, vacotel_username, vacotel_password, test_mode, default_rate_per_sms } = req.body;
+  const { vacotel_base_url, vacotel_username, vacotel_password, vacotel_api_id, test_mode, default_rate_per_sms } = req.body;
   if (vacotel_base_url) setSetting('vacotel_base_url', vacotel_base_url);
   if (vacotel_username) setSetting('vacotel_username', vacotel_username);
   if (vacotel_password) setSetting('vacotel_password', vacotel_password);
+  if (vacotel_api_id !== undefined) setSetting('vacotel_api_id', vacotel_api_id);
   if (test_mode !== undefined) setSetting('test_mode', test_mode ? '1' : '0');
   if (default_rate_per_sms !== undefined) setSetting('default_rate_per_sms', String(default_rate_per_sms));
   res.json({ ok: true, test_mode: getSetting('test_mode') === '1' });
 });
 
-// Ping Vacotel API (does not use test mode — sends to invalid dest to verify credentials)
+// Probe Vacotel API — GET + POST SendSMS (per Vacotel docs), not test mode
 app.post('/api/settings/test-connection', async (req, res) => {
   if (getSetting('test_mode') === '1') {
     return res.status(400).json({ error: 'Turn off Test mode, click Save, then try again.' });
@@ -168,26 +196,26 @@ app.post('/api/settings/test-connection', async (req, res) => {
   const baseUrl = getSetting('vacotel_base_url');
   const username = getSetting('vacotel_username');
   const password = getSetting('vacotel_password');
-  if (!username || !password) {
-    return res.status(400).json({ error: 'Username and password required in Settings' });
+  const apiId = getSetting('vacotel_api_id');
+  if (!username || (!apiId && !password)) {
+    return res.status(400).json({ error: 'Username and API key (or password for legacy API) required in Settings' });
   }
-  const result = await sendSms({
-    baseUrl, username, password,
-    destination: '0',
-    source: 'Dispatch',
-    text: 'connection test',
-    dataCoding: 0,
-    testMode: false
-  });
+
+  const probe = await probeVacotelApi({ baseUrl, username, password, apiId });
+  const block = probe.get;
+  const getOk = block.reachable && block.auth_ok !== false;
+
+  let hint = block.summary || 'See probe details below.';
+  if (!block.reachable) {
+    hint = 'Cannot reach Vacotel — check Base URL (e.g. http://otusprivategw.com).';
+  } else if (getOk) {
+    hint = 'Vacotel API is reachable. Try a real send to your own number.';
+  }
+
   res.json({
-    ok: result.ok,
-    error_code: result.errorCode,
-    error_description: result.errorDescription || ERROR_CODES[String(result.errorCode)],
-    hint: result.errorCode === -5 ? 'Invalid credentials — check username/password.'
-      : result.errorCode === -8 ? 'Your IP may need whitelisting with Vacotel.'
-      : result.errorCode === -3 || result.errorCode === -4 ? 'API reachable — credentials accepted (destination rejected as expected).'
-      : result.ok ? 'API accepted the message — check your Vacotel account.'
-      : 'See error code above.'
+    ok: getOk,
+    hint,
+    probe
   });
 });
 
@@ -748,4 +776,11 @@ db.prepare(`
     AND id NOT IN (SELECT DISTINCT campaign_id FROM sends WHERE campaign_id IS NOT NULL)
 `).run();
 
-app.listen(PORT, () => console.log(`Vacotel SMS app running at http://localhost:${PORT}`));
+app.listen(PORT, () => {
+  console.log(`Vacotel SMS app running at http://localhost:${PORT}`);
+  if (AUTH_ENABLED) {
+    console.log('Access protection: ON (set DISPATCH_USER / DISPATCH_PASSWORD)');
+  } else {
+    console.log('Access protection: OFF — set DISPATCH_USER and DISPATCH_PASSWORD to require login');
+  }
+});

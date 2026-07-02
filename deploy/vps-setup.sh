@@ -52,7 +52,15 @@ if ! command -v pm2 &>/dev/null; then
 fi
 
 pm2 delete dispatch 2>/dev/null || true
-PORT="$PORT" pm2 start server.js --name dispatch
+if [[ -z "${DISPATCH_USER:-}" || -z "${DISPATCH_PASSWORD:-}" ]]; then
+  echo ""
+  echo "  WARNING: DISPATCH_USER / DISPATCH_PASSWORD not set — the app is open to anyone with the URL."
+  echo "  Re-run with credentials, e.g.:"
+  echo "    DISPATCH_USER=admin DISPATCH_PASSWORD='your-secret' $0"
+  echo ""
+fi
+PORT="$PORT" DISPATCH_USER="${DISPATCH_USER:-}" DISPATCH_PASSWORD="${DISPATCH_PASSWORD:-}" \
+  pm2 start server.js --name dispatch
 pm2 save
 env PATH="$PATH:/usr/bin" pm2 startup systemd -u root --hp /root >/dev/null 2>&1 || true
 
@@ -67,7 +75,7 @@ echo "  DLR webhook:  http://${PUBLIC_IP}:${PORT}/api/dlr"
 echo "  Whitelist IP: ${PUBLIC_IP}  (give this to Vacotel)"
 echo ""
 echo "  Next steps:"
-echo "  1. Open the app URL in your browser"
+echo "  1. Open the app URL in your browser (login if you set DISPATCH_USER / DISPATCH_PASSWORD)"
 echo "  2. Settings → Vacotel credentials"
 echo "  3. Turn OFF Test mode → Save"
 echo "  4. Test Vacotel connection, then send 1 test SMS"

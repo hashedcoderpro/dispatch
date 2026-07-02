@@ -509,7 +509,9 @@ async function loadSettings() {
   const s = await api('/api/settings');
   document.getElementById('setBaseUrl').value = s.vacotel_base_url || '';
   document.getElementById('setUsername').value = s.vacotel_username || '';
-  document.getElementById('setPassword').placeholder = s.has_password ? 'Password saved — leave blank to keep it' : 'Vacotel account password';
+  document.getElementById('setApiId').value = '';
+  document.getElementById('setApiId').placeholder = s.has_api_id ? 'API key saved — enter new to replace' : 'From Vacotel API integration';
+  document.getElementById('setPassword').placeholder = s.has_password ? 'Password saved — leave blank to keep it' : 'Legacy API only';
   document.getElementById('setTestMode').checked = !!s.test_mode;
   updateTestModeUI(s.test_mode);
   document.getElementById('setDefaultRate').value = s.default_rate_per_sms ?? '';
@@ -528,17 +530,26 @@ async function saveSettings() {
     test_mode: document.getElementById('setTestMode').checked,
     default_rate_per_sms: parseFloat(document.getElementById('setDefaultRate').value) || 0
   };
+  const apiId = document.getElementById('setApiId').value.trim();
+  if (apiId) payload.vacotel_api_id = apiId;
   const pw = document.getElementById('setPassword').value;
   if (pw) payload.vacotel_password = pw;
   await api('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
   toast(payload.test_mode ? 'Saved — TEST mode (no real SMS to Vacotel)' : 'Saved — LIVE mode (real SMS enabled)');
   document.getElementById('setPassword').value = '';
+  document.getElementById('setApiId').value = '';
   loadSettings();
 }
 async function testVacotelConnection() {
   try {
     const r = await api('/api/settings/test-connection', { method: 'POST' });
-    toast(r.hint || (r.ok ? 'Vacotel connection OK' : `API error: ${r.error_description}`), !r.ok && r.error_code === -5);
+    const g = r.probe?.get;
+    const lines = [
+      r.hint,
+      g ? `${g.summary || g.error || '—'} (${g.ms}ms)` : ''
+    ].filter(Boolean).join(' · ');
+    toast(lines, !r.ok);
+    if (g?.body_preview) console.log('Vacotel probe', r.probe);
   } catch (e) { toast(e.message, true); }
 }
 async function topupBalance() {

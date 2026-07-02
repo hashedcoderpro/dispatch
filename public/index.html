@@ -199,15 +199,17 @@
       <div class="card" style="max-width:480px;">
         <div class="section-title" style="margin-top:0;">API connection</div>
         <label>Base URL</label>
-        <input type="text" id="setBaseUrl" placeholder="http://api.vacotel.net">
+        <input type="text" id="setBaseUrl" placeholder="http://otusprivategw.com">
         <label>Username</label>
         <input type="text" id="setUsername" placeholder="Vacotel account username">
-        <label>Password</label>
+        <label>API key (apiId)</label>
+        <input type="text" id="setApiId" placeholder="From Vacotel → API integration" autocomplete="off">
+        <label>Password <span class="muted">(legacy API only — leave blank if using API key)</span></label>
         <input type="password" id="setPassword" placeholder="Leave blank to keep current password">
         <label style="display:flex; align-items:center; gap:8px; margin-bottom:14px;">
           <input type="checkbox" id="setTestMode" style="width:auto; margin:0;"> Test mode (simulate sends, no real SMS or cost)
         </label>
-        <p class="hint" style="margin-top:0;">Vacotel uses <strong>Username</strong> and <strong>Password</strong> HTTP headers only — no API key or integration name required for this API.</p>
+        <p class="hint" style="margin-top:0;">Your account uses the <strong>private gateway</strong> (<code>otusprivategw.com</code>) with <strong>username + API key</strong> — copy from Vacotel → API integration → test integration.</p>
         <button class="btn-primary" onclick="saveSettings()">Save settings</button>
         <button class="btn-secondary" style="margin-left:8px;" onclick="testVacotelConnection()">Test Vacotel connection</button>
       </div>

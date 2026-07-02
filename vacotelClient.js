@@ -1,8 +1,5 @@
 const fetch = require('node-fetch');
 
-// GSM 7-bit default alphabet (basic set). If the message contains any
-// character outside this set, we must use Unicode (dataCoding = 8) or the
-// carrier will mangle/reject the text.
 const GSM7_BASIC = "@£$¥èéùìòÇ\nØø\rÅåΔ_ΦΓΛΩΠΨΣΘΞ ÆæßÉ !\"#¤%&'()*+,-./0123456789:;<=>?¡ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÑÜ§¿abcdefghijklmnopqrstuvwxyzäöñüà";
 
 function isGsm7(text) {
@@ -12,15 +9,11 @@ function isGsm7(text) {
   return true;
 }
 
-/**
- * Decide dataCoding + compute segment count (message parts) for billing/preview.
- * dataCoding: 0 = GSM7 default, 8 = Unicode UCS2 (per Vacotel docs)
- */
 function analyzeMessage(text) {
   const gsm7 = isGsm7(text);
   const dataCoding = gsm7 ? 0 : 8;
   const singleLimit = gsm7 ? 160 : 70;
-  const multiLimit = gsm7 ? 153 : 67; // per-segment limit once concatenated
+  const multiLimit = gsm7 ? 153 : 67;
   let parts;
   if (text.length <= singleLimit) parts = 1;
   else parts = Math.ceil(text.length / multiLimit);
@@ -28,19 +21,59 @@ function analyzeMessage(text) {
 }
 
 function normalizeDestination(phone) {
-  // Vacotel does not support a leading '+'
   return String(phone).trim().replace(/^\+/, '').replace(/[\s\-()]/g, '');
 }
 
+function sendEndpoint(baseUrl) {
+  const host = baseUrl.replace(/\/$/, '');
+  if (/\/API\/SendSMS$/i.test(host)) return host;
+  return `${host}/API/SendSMS`;
+}
+
+function parseApiResponse(bodyText, defaultParts) {
+  let json = null;
+  try { json = JSON.parse(bodyText); } catch (_) {}
+
+  if (json) {
+    const sms = (json.SMS && json.SMS[0]) || {};
+    const errorCode = sms.ErrorCode !== undefined ? sms.ErrorCode : json.ErrorCode;
+    const ok = errorCode === 0 || json.success === true || json.Status === 'OK';
+    return {
+      ok,
+      errorCode: errorCode ?? (ok ? 0 : -10),
+      errorDescription: json.ErrorDescription || json.message || json.Status || bodyText.slice(0, 200),
+      vendorId: sms.Id || json.messageId || json.MessageId || null,
+      messageCount: json.MessageCount || 1,
+      messageParts: json.MessageParts || defaultParts,
+      raw: json
+    };
+  }
+
+  const t = bodyText.trim();
+  const failed = /fail|error|invalid|reject/i.test(t);
+  const ok = !failed && /ok|sent|success|accepted/i.test(t);
+  return {
+    ok,
+    errorCode: ok ? 0 : -10,
+    errorDescription: t || 'Empty response',
+    vendorId: null,
+    messageCount: ok ? 1 : 0,
+    messageParts: defaultParts,
+    raw: t
+  };
+}
+
 /**
- * Send a single SMS via the Vacotel HTTP(s) POST API.
- * Returns { ok, errorCode, errorDescription, vendorId, messageCount, messageParts, raw }
+ * Send SMS — supports:
+ * 1) Private gateway (Otus etc): GET /API/SendSMS?username=&apiId=&json=True&...
+ * 2) Legacy Vacotel docs: POST /HTTP/api/Client/SendSMS with Username/Password headers
  */
-async function sendSms({ baseUrl, username, password, destination, source, text, dataCoding, testMode }) {
+async function sendSms({ baseUrl, username, password, apiId, destination, source, text, dataCoding, testMode }) {
   const dest = normalizeDestination(destination);
+  const parts = analyzeMessage(text).parts;
+  const coding = dataCoding ?? analyzeMessage(text).dataCoding;
 
   if (testMode) {
-    // Simulated response so the app is fully testable before going live.
     await new Promise(r => setTimeout(r, 50));
     return {
       ok: true,
@@ -48,25 +81,37 @@ async function sendSms({ baseUrl, username, password, destination, source, text,
       errorDescription: 'Ok (test mode - not actually sent)',
       vendorId: 'test-' + Math.random().toString(36).slice(2, 10),
       messageCount: 1,
-      messageParts: analyzeMessage(text).parts,
+      messageParts: parts,
       raw: null
     };
   }
 
-  const url = `${baseUrl.replace(/\/$/, '')}/HTTP/api/Client/SendSMS`;
-  const body = { destination: dest, source, text, dataCoding };
-
   let resp;
   try {
-    resp = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Username': username,
-        'Password': password
-      },
-      body: JSON.stringify(body)
-    });
+    if (apiId) {
+      const params = new URLSearchParams({
+        username: username || '',
+        apiId,
+        json: 'True',
+        destination: dest,
+        source,
+        text
+      });
+      if (coding !== undefined) params.set('datacoding', String(coding));
+      const url = `${sendEndpoint(baseUrl)}?${params}`;
+      resp = await fetch(url, { method: 'GET' });
+    } else {
+      const url = `${baseUrl.replace(/\/$/, '')}/HTTP/api/Client/SendSMS`;
+      resp = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Username': username,
+          'Password': password
+        },
+        body: JSON.stringify({ destination: dest, source, text, dataCoding: coding })
+      });
+    }
   } catch (e) {
     return {
       ok: false,
@@ -74,29 +119,65 @@ async function sendSms({ baseUrl, username, password, destination, source, text,
       errorDescription: `Network error: ${e.message}`,
       vendorId: null,
       messageCount: 0,
-      messageParts: analyzeMessage(text).parts,
+      messageParts: parts,
       raw: null
     };
   }
 
-  let json;
-  try {
-    json = await resp.json();
-  } catch (e) {
-    return { ok: false, errorCode: -10, errorDescription: 'UnknownError (bad response body)', raw: null };
+  const bodyText = await resp.text();
+  return parseApiResponse(bodyText, parts);
+}
+
+async function probeVacotelApi({ baseUrl, username, password, apiId }) {
+  const started = Date.now();
+  const result = await sendSms({
+    baseUrl,
+    username,
+    password,
+    apiId,
+    destination: '0',
+    source: 'Dispatch',
+    text: 'probe',
+    dataCoding: 0,
+    testMode: false
+  });
+
+  const ms = Date.now() - started;
+  let summary = result.errorDescription || 'Unknown';
+  let reachable = true;
+  let auth_ok = result.ok;
+
+  if (result.errorDescription?.includes('Network error')) {
+    reachable = false;
+    auth_ok = false;
+    summary = result.errorDescription;
+  } else if (result.errorCode === -5) {
+    auth_ok = false;
+    summary = 'Invalid credentials';
+  } else if (result.errorCode === -8) {
+    auth_ok = false;
+    summary = 'IP not whitelisted';
+  } else if (result.errorCode === -3 || result.errorCode === -4) {
+    auth_ok = true;
+    summary = 'API reachable (destination rejected — expected for probe)';
+  } else if (result.ok) {
+    summary = 'API accepted request';
+  } else if (/MESSAGE_FAILED/i.test(summary)) {
+    summary = 'API reachable — request rejected (check destination/SID/credits)';
+    auth_ok = true;
   }
 
-  const sms = (json.SMS && json.SMS[0]) || {};
-  const errorCode = sms.ErrorCode !== undefined ? sms.ErrorCode : json.ErrorCode;
-
   return {
-    ok: errorCode === 0,
-    errorCode,
-    errorDescription: json.ErrorDescription,
-    vendorId: sms.Id,
-    messageCount: json.MessageCount,
-    messageParts: json.MessageParts,
-    raw: json
+    base_url: baseUrl,
+    mode: apiId ? 'gateway-get-apiId' : 'legacy-post-password',
+    get: {
+      ms,
+      reachable,
+      auth_ok,
+      summary,
+      error_code: result.errorCode,
+      body_preview: typeof result.raw === 'string' ? result.raw.slice(0, 800) : JSON.stringify(result.raw || {}).slice(0, 800)
+    }
   };
 }
 
@@ -124,4 +205,4 @@ const DLR_STATUS = {
   8: 'Rejected'
 };
 
-module.exports = { sendSms, analyzeMessage, normalizeDestination, ERROR_CODES, DLR_STATUS };
+module.exports = { sendSms, analyzeMessage, normalizeDestination, probeVacotelApi, ERROR_CODES, DLR_STATUS };

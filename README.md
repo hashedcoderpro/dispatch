@@ -31,6 +31,37 @@ Open `http://localhost:3000`. Go to **Settings** and enter your Vacotel username
 password. Leave **Test mode** on until you're ready to send real messages — it
 simulates the API so you can safely try the whole flow first.
 
+## Access protection (username / password)
+
+By default the app is open to anyone who can reach the URL. To require a login,
+set these environment variables before starting the server:
+
+| Variable | Purpose |
+|----------|---------|
+| `DISPATCH_USER` | Username for the browser login prompt |
+| `DISPATCH_PASSWORD` | Password for the browser login prompt |
+
+**Local (PowerShell):**
+
+```powershell
+$env:DISPATCH_USER = "admin"
+$env:DISPATCH_PASSWORD = "your-secret-password"
+npm start
+```
+
+**Production (PM2):**
+
+```bash
+DISPATCH_USER=admin DISPATCH_PASSWORD=your-secret-password pm2 start server.js --name dispatch
+```
+
+Or persist them in a PM2 ecosystem file / systemd unit. Once set, visiting the
+app shows a browser login dialog; API calls from the UI reuse those credentials
+automatically.
+
+The Vacotel DLR webhook (`/api/dlr`) stays **unauthenticated** so Vacotel can
+still push delivery receipts without credentials.
+
 ## Pointing Vacotel's DLR callback at this app
 
 Vacotel needs to reach `/api/dlr` on a public URL. Options:
