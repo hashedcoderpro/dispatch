@@ -1,9 +1,19 @@
 const express = require('express');
 const multer = require('multer');
+const crypto = require('crypto');
 const { parse } = require('csv-parse/sync');
 const path = require('path');
 const db = require('./db');
-const { sendSms, analyzeMessage, normalizeDestination, probeVacotelApi, ERROR_CODES, DLR_STATUS } = require('./vacotelClient');
+const {
+  VACOTEL_GATEWAY_URL,
+  sendSms,
+  analyzeMessage,
+  normalizeDestination,
+  probeVacotelApi,
+  validateVacotelCredentials,
+  ERROR_CODES,
+  DLR_STATUS
+} = require('./vacotelClient');
 const {
   parseLines, parsePhones, buildInterleavedQueue, buildCartesianQueue, assignTemplates, estimateCost
 } = require('./sendHelpers');
@@ -11,33 +21,74 @@ const {
 const app = express();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
 
-const AUTH_USER = process.env.DISPATCH_USER || '';
-const AUTH_PASS = process.env.DISPATCH_PASSWORD || '';
-const AUTH_ENABLED = Boolean(AUTH_USER && AUTH_PASS);
+const SESSION_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+const PUBLIC_API = new Set(['/api/auth/login', '/api/auth/status']);
 
-function basicAuth(req, res, next) {
-  if (!AUTH_ENABLED || req.path === '/api/dlr') return next();
-
-  const header = req.headers.authorization;
-  if (!header || !header.startsWith('Basic ')) {
-    res.set('WWW-Authenticate', 'Basic realm="Dispatch"');
-    return res.status(401).send('Authentication required');
+function parseCookies(req) {
+  const out = {};
+  for (const part of (req.headers.cookie || '').split(';')) {
+    const i = part.indexOf('=');
+    if (i > 0) out[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1).trim());
   }
+  return out;
+}
 
-  const decoded = Buffer.from(header.slice(6), 'base64').toString();
-  const sep = decoded.indexOf(':');
-  const user = sep >= 0 ? decoded.slice(0, sep) : decoded;
-  const pass = sep >= 0 ? decoded.slice(sep + 1) : '';
+function getSessionSecret() {
+  let secret = getSetting('session_secret');
+  if (!secret) {
+    secret = crypto.randomBytes(32).toString('hex');
+    setSetting('session_secret', secret);
+  }
+  return secret;
+}
 
-  if (user === AUTH_USER && pass === AUTH_PASS) return next();
+function signSession(username) {
+  const payload = JSON.stringify({ username, exp: Date.now() + SESSION_MAX_AGE_MS });
+  const body = Buffer.from(payload).toString('base64url');
+  const sig = crypto.createHmac('sha256', getSessionSecret()).update(body).digest('base64url');
+  return `${body}.${sig}`;
+}
 
-  res.set('WWW-Authenticate', 'Basic realm="Dispatch"');
-  return res.status(401).send('Invalid credentials');
+function verifySession(req) {
+  const token = parseCookies(req).dispatch_session;
+  if (!token) return null;
+  const dot = token.lastIndexOf('.');
+  if (dot < 1) return null;
+  const body = token.slice(0, dot);
+  const sig = token.slice(dot + 1);
+  const expected = crypto.createHmac('sha256', getSessionSecret()).update(body).digest('base64url');
+  if (sig.length !== expected.length || !crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) return null;
+  try {
+    const data = JSON.parse(Buffer.from(body, 'base64url').toString());
+    if (!data.username || !data.exp || data.exp < Date.now()) return null;
+    return data.username;
+  } catch {
+    return null;
+  }
+}
+
+function setSessionCookie(res, username) {
+  res.setHeader('Set-Cookie', `dispatch_session=${signSession(username)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${Math.floor(SESSION_MAX_AGE_MS / 1000)}`);
+}
+
+function clearSessionCookie(res) {
+  res.setHeader('Set-Cookie', 'dispatch_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0');
+}
+
+function requireAuth(req, res, next) {
+  if (!req.path.startsWith('/api/') || req.path === '/api/dlr' || PUBLIC_API.has(req.path)) return next();
+  const username = verifySession(req);
+  if (!username) return res.status(401).json({ error: 'Not authenticated' });
+  if (!getSetting('vacotel_username') || !getSetting('vacotel_api_id')) {
+    return res.status(401).json({ error: 'Vacotel credentials not configured' });
+  }
+  req.sessionUsername = username;
+  next();
 }
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-app.use(basicAuth);
+app.use(requireAuth);
 app.use(express.static(path.join(__dirname, 'public')));
 
 // ---------- helpers ----------
@@ -116,9 +167,7 @@ function createListFromPhones(name, phones) {
 }
 
 async function processSendQueue({ queue, campaignId, ratePerSms, throttleMs, getText, getPhone, getSource, getLeadId, getTemplateId, notePrefix }) {
-  const baseUrl = getSetting('vacotel_base_url');
   const username = getSetting('vacotel_username');
-  const password = getSetting('vacotel_password');
   const apiId = getSetting('vacotel_api_id');
   const testMode = getSetting('test_mode') === '1';
 
@@ -137,7 +186,16 @@ async function processSendQueue({ queue, campaignId, ratePerSms, throttleMs, get
 
     let result;
     try {
-      result = await sendSms({ baseUrl, username, password, apiId, destination: phone, source, text, dataCoding, testMode });
+      result = await sendSms({
+        baseUrl: VACOTEL_GATEWAY_URL,
+        username,
+        apiId,
+        destination: phone,
+        source,
+        text,
+        dataCoding,
+        testMode
+      });
     } catch (e) {
       result = { ok: false, errorCode: -10, errorDescription: 'Network/request error: ' + e.message };
     }
@@ -165,58 +223,58 @@ async function processSendQueue({ queue, campaignId, ratePerSms, throttleMs, get
   }
 }
 
+// ---------- auth ----------
+app.get('/api/auth/status', (req, res) => {
+  const username = verifySession(req);
+  res.json({
+    authenticated: !!username,
+    username: username || getSetting('vacotel_username') || null
+  });
+});
+
+app.post('/api/auth/login', async (req, res) => {
+  const username = String(req.body.username || '').trim();
+  const apiId = String(req.body.apiId || '').trim();
+  if (!username || !apiId) {
+    return res.status(400).json({ error: 'Username and API token are required' });
+  }
+
+  const probe = await probeVacotelApi({
+    baseUrl: VACOTEL_GATEWAY_URL,
+    username,
+    apiId
+  });
+  const check = validateVacotelCredentials(probe);
+  if (!check.ok) {
+    return res.status(401).json({ error: check.error });
+  }
+
+  setSetting('vacotel_username', username);
+  setSetting('vacotel_api_id', apiId);
+  setSetting('vacotel_base_url', VACOTEL_GATEWAY_URL);
+  setSessionCookie(res, username);
+  res.json({ ok: true, username });
+});
+
+app.post('/api/auth/logout', (req, res) => {
+  clearSessionCookie(res);
+  res.json({ ok: true });
+});
+
 // ---------- settings ----------
 app.get('/api/settings', (req, res) => {
   res.json({
-    vacotel_base_url: getSetting('vacotel_base_url'),
     vacotel_username: getSetting('vacotel_username'),
-    has_password: !!getSetting('vacotel_password'),
-    has_api_id: !!getSetting('vacotel_api_id'),
     test_mode: getSetting('test_mode') === '1',
     default_rate_per_sms: parseFloat(getSetting('default_rate_per_sms') || '0') || 0
   });
 });
 
 app.post('/api/settings', (req, res) => {
-  const { vacotel_base_url, vacotel_username, vacotel_password, vacotel_api_id, test_mode, default_rate_per_sms } = req.body;
-  if (vacotel_base_url) setSetting('vacotel_base_url', vacotel_base_url);
-  if (vacotel_username) setSetting('vacotel_username', vacotel_username);
-  if (vacotel_password) setSetting('vacotel_password', vacotel_password);
-  if (vacotel_api_id !== undefined) setSetting('vacotel_api_id', vacotel_api_id);
+  const { test_mode, default_rate_per_sms } = req.body;
   if (test_mode !== undefined) setSetting('test_mode', test_mode ? '1' : '0');
   if (default_rate_per_sms !== undefined) setSetting('default_rate_per_sms', String(default_rate_per_sms));
   res.json({ ok: true, test_mode: getSetting('test_mode') === '1' });
-});
-
-// Probe Vacotel API — GET + POST SendSMS (per Vacotel docs), not test mode
-app.post('/api/settings/test-connection', async (req, res) => {
-  if (getSetting('test_mode') === '1') {
-    return res.status(400).json({ error: 'Turn off Test mode, click Save, then try again.' });
-  }
-  const baseUrl = getSetting('vacotel_base_url');
-  const username = getSetting('vacotel_username');
-  const password = getSetting('vacotel_password');
-  const apiId = getSetting('vacotel_api_id');
-  if (!username || (!apiId && !password)) {
-    return res.status(400).json({ error: 'Username and API key (or password for legacy API) required in Settings' });
-  }
-
-  const probe = await probeVacotelApi({ baseUrl, username, password, apiId });
-  const block = probe.get;
-  const getOk = block.reachable && block.auth_ok !== false;
-
-  let hint = block.summary || 'See probe details below.';
-  if (!block.reachable) {
-    hint = 'Cannot reach Vacotel — check Base URL (e.g. http://otusprivategw.com).';
-  } else if (getOk) {
-    hint = 'Vacotel API is reachable. Try a real send to your own number.';
-  }
-
-  res.json({
-    ok: getOk,
-    hint,
-    probe
-  });
 });
 
 // ---------- balance ----------
@@ -337,9 +395,26 @@ app.get('/api/lead-lists', (req, res) => {
 });
 
 app.post('/api/lead-lists', upload.single('file'), (req, res) => {
-  if (!req.file) return res.status(400).json({ error: 'CSV file required' });
-  const name = req.body.name || req.file.originalname;
+  const name = (req.body.name || '').trim() || req.file?.originalname || 'Lead list';
 
+  if (req.file) {
+    const filename = req.file.originalname.toLowerCase();
+    if (!filename.endsWith('.csv')) {
+      const phones = parsePhones(req.file.buffer.toString('utf8'));
+      if (!phones.length) return res.status(400).json({ error: 'No valid phone numbers in file' });
+      const created = createListFromPhones(name, phones);
+      return res.json({ ok: true, list_id: created.listId, inserted: created.count, skipped: 0 });
+    }
+  } else if (req.body.numbers) {
+    const phones = parsePhones(req.body.numbers);
+    if (!phones.length) return res.status(400).json({ error: 'No valid phone numbers' });
+    const created = createListFromPhones(name, phones);
+    return res.json({ ok: true, list_id: created.listId, inserted: created.count, skipped: 0 });
+  } else {
+    return res.status(400).json({ error: 'Paste numbers or upload a .txt / .csv file' });
+  }
+
+  // CSV upload (req.file is present and .csv)
   let records;
   try {
     records = parse(req.file.buffer, { columns: true, skip_empty_lines: true, trim: true });
@@ -561,23 +636,29 @@ app.post('/api/campaigns/launch', upload.fields([
     let listId = seg.list_id;
     const file = segmentFiles[i];
     if (!listId && file) {
-        let records;
-        try {
-          records = parse(file.buffer, { columns: true, skip_empty_lines: true, trim: true });
-        } catch (e) {
-          return res.status(400).json({ error: `Segment ${i + 1}: could not parse CSV` });
+        const text = file.buffer.toString('utf8');
+        const filename = file.originalname.toLowerCase();
+        let parsed = [];
+        if (filename.endsWith('.csv')) {
+          let records;
+          try {
+            records = parse(text, { columns: true, skip_empty_lines: true, trim: true });
+          } catch (e) {
+            return res.status(400).json({ error: `Segment ${i + 1}: could not parse CSV` });
+          }
+          const cols = Object.keys(records[0] || {});
+          const phoneCol = cols.find(c => /phone|mobile|destination|number/i.test(c)) || cols[0];
+          const seen = new Set();
+          for (const r of records) {
+            const phone = normalizeDestination(r[phoneCol]);
+            if (!/^\d{7,15}$/.test(phone) || seen.has(phone)) continue;
+            seen.add(phone);
+            parsed.push(phone);
+          }
+        } else {
+          parsed = parsePhones(text);
         }
-        const cols = Object.keys(records[0] || {});
-        const phoneCol = cols.find(c => /phone|mobile|destination|number/i.test(c)) || cols[0];
-        const parsed = [];
-        const seen = new Set();
-        for (const r of records) {
-          const phone = normalizeDestination(r[phoneCol]);
-          if (!/^\d{7,15}$/.test(phone) || seen.has(phone)) continue;
-          seen.add(phone);
-          parsed.push(phone);
-        }
-        if (!parsed.length) return res.status(400).json({ error: `Segment ${i + 1}: no valid numbers in CSV` });
+        if (!parsed.length) return res.status(400).json({ error: `Segment ${i + 1}: no valid numbers in file` });
         const created = createListFromPhones(`${name} — ${seg.label || 'segment ' + (i + 1)}`, parsed);
         listId = created.listId;
     } else if (!listId && seg.phones) {
@@ -776,11 +857,4 @@ db.prepare(`
     AND id NOT IN (SELECT DISTINCT campaign_id FROM sends WHERE campaign_id IS NOT NULL)
 `).run();
 
-app.listen(PORT, () => {
-  console.log(`Vacotel SMS app running at http://localhost:${PORT}`);
-  if (AUTH_ENABLED) {
-    console.log('Access protection: ON (set DISPATCH_USER / DISPATCH_PASSWORD)');
-  } else {
-    console.log('Access protection: OFF — set DISPATCH_USER and DISPATCH_PASSWORD to require login');
-  }
-});
+app.listen(PORT, () => console.log(`Vacotel SMS app running at http://localhost:${PORT}`));

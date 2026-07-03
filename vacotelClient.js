@@ -1,5 +1,7 @@
 const fetch = require('node-fetch');
 
+const VACOTEL_GATEWAY_URL = 'https://otusprivategw.com';
+
 const GSM7_BASIC = "@£$¥èéùìòÇ\nØø\rÅåΔ_ΦΓΛΩΠΨΣΘΞ ÆæßÉ !\"#¤%&'()*+,-./0123456789:;<=>?¡ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÑÜ§¿abcdefghijklmnopqrstuvwxyzäöñüà";
 
 function isGsm7(text) {
@@ -24,8 +26,14 @@ function normalizeDestination(phone) {
   return String(phone).trim().replace(/^\+/, '').replace(/[\s\-()]/g, '');
 }
 
+function normalizeBaseUrl(baseUrl) {
+  const url = String(baseUrl || '').replace(/\/$/, '');
+  if (/^http:\/\/otusprivategw\.com/i.test(url)) return url.replace(/^http:/i, 'https:');
+  return url;
+}
+
 function sendEndpoint(baseUrl) {
-  const host = baseUrl.replace(/\/$/, '');
+  const host = normalizeBaseUrl(baseUrl);
   if (/\/API\/SendSMS$/i.test(host)) return host;
   return `${host}/API/SendSMS`;
 }
@@ -181,6 +189,26 @@ async function probeVacotelApi({ baseUrl, username, password, apiId }) {
   };
 }
 
+function validateVacotelCredentials(probe) {
+  const b = probe.get;
+  if (!b.reachable) {
+    return { ok: false, error: 'Cannot reach Vacotel gateway — try again later' };
+  }
+  if (b.error_code === -5 || b.auth_ok === false) {
+    return { ok: false, error: 'Invalid username or API token' };
+  }
+  if (b.auth_ok === true || b.error_code === -3 || b.error_code === -4 || b.error_code === 0) {
+    return { ok: true };
+  }
+  if (/invalid.*credential|unauthorized|authentication/i.test(b.summary || '')) {
+    return { ok: false, error: 'Invalid username or API token' };
+  }
+  if (/reachable/i.test(b.summary || '')) {
+    return { ok: true };
+  }
+  return { ok: false, error: b.summary || 'Could not verify credentials' };
+}
+
 const ERROR_CODES = {
   0: 'Ok',
   '-1': 'NoMessage',
@@ -205,4 +233,13 @@ const DLR_STATUS = {
   8: 'Rejected'
 };
 
-module.exports = { sendSms, analyzeMessage, normalizeDestination, probeVacotelApi, ERROR_CODES, DLR_STATUS };
+module.exports = {
+  VACOTEL_GATEWAY_URL,
+  sendSms,
+  analyzeMessage,
+  normalizeDestination,
+  probeVacotelApi,
+  validateVacotelCredentials,
+  ERROR_CODES,
+  DLR_STATUS
+};

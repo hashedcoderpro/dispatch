@@ -8,7 +8,24 @@
 </head>
 <body>
 
-<div class="shell">
+<div id="loginScreen" class="login-screen">
+  <div class="login-card">
+    <div class="brand-mark" style="margin-bottom:6px;">
+      <span class="bars"><span></span><span></span><span></span><span></span></span>
+      Dispatch
+    </div>
+    <p class="login-sub">Vacotel SMS Console</p>
+    <p class="hint" style="margin-top:0;">Sign in with your Vacotel username and API token from the portal integration page.</p>
+    <label>Username</label>
+    <input type="text" id="loginUsername" placeholder="e.g. ClientOtus" autocomplete="username">
+    <label>API token</label>
+    <input type="password" id="loginApiToken" placeholder="From Vacotel → API integration" autocomplete="current-password">
+    <p id="loginError" class="login-error" style="display:none;"></p>
+    <button class="btn-primary login-btn" id="loginBtn" onclick="doLogin()">Sign in</button>
+  </div>
+</div>
+
+<div class="shell" id="appShell" style="display:none;">
   <div class="sidebar">
     <div class="brand">
       <div class="brand-mark">
@@ -160,7 +177,7 @@
       <div class="page-header">
         <div>
           <h1>Lead Lists</h1>
-          <p>Upload a CSV of 500–1,000 contacts. We auto-detect phone, name, and custom columns.</p>
+          <p>Upload or paste contacts — .txt (one number per line) or .csv (with name columns).</p>
         </div>
         <button class="btn-primary" onclick="openModal('modal-upload-leads')">+ Upload list</button>
       </div>
@@ -194,24 +211,21 @@
 
     <!-- SETTINGS -->
     <div class="page" id="page-settings">
-      <div class="page-header"><div><h1>Settings</h1><p>Vacotel API credentials and billing rate.</p></div></div>
+      <div class="page-header"><div><h1>Settings</h1><p>Test mode, billing, and webhooks.</p></div></div>
 
       <div class="card" style="max-width:480px;">
-        <div class="section-title" style="margin-top:0;">API connection</div>
-        <label>Base URL</label>
-        <input type="text" id="setBaseUrl" placeholder="http://otusprivategw.com">
-        <label>Username</label>
-        <input type="text" id="setUsername" placeholder="Vacotel account username">
-        <label>API key (apiId)</label>
-        <input type="text" id="setApiId" placeholder="From Vacotel → API integration" autocomplete="off">
-        <label>Password <span class="muted">(legacy API only — leave blank if using API key)</span></label>
-        <input type="password" id="setPassword" placeholder="Leave blank to keep current password">
+        <div class="section-title" style="margin-top:0;">Account</div>
+        <p class="hint" style="margin-top:0;">Signed in as <strong id="setSignedInUser">—</strong></p>
+        <button class="btn-secondary" onclick="doLogout()">Sign out</button>
+      </div>
+
+      <div class="card" style="max-width:480px; margin-top:16px;">
+        <div class="section-title" style="margin-top:0;">Sending mode</div>
         <label style="display:flex; align-items:center; gap:8px; margin-bottom:14px;">
           <input type="checkbox" id="setTestMode" style="width:auto; margin:0;"> Test mode (simulate sends, no real SMS or cost)
         </label>
-        <p class="hint" style="margin-top:0;">Your account uses the <strong>private gateway</strong> (<code>otusprivategw.com</code>) with <strong>username + API key</strong> — copy from Vacotel → API integration → test integration.</p>
+        <p class="hint" style="margin-top:0;">Turn off test mode when you're ready to send real SMS through Vacotel.</p>
         <button class="btn-primary" onclick="saveSettings()">Save settings</button>
-        <button class="btn-secondary" style="margin-left:8px;" onclick="testVacotelConnection()">Test Vacotel connection</button>
       </div>
 
       <div class="card" style="max-width:480px; margin-top:16px;">
@@ -249,12 +263,14 @@
     <h2>Upload lead list</h2>
     <label>List name</label>
     <input type="text" id="leadListName" placeholder="e.g. July prospects batch 1">
-    <label>CSV file</label>
+    <label>Numbers (one per line)</label>
+    <textarea id="leadNumbersText" style="min-height:120px;" placeholder="34612345678&#10;34698765432&#10;15551234567"></textarea>
+    <p class="hint" style="margin-top:-6px;">Or upload a file below — .txt (one number per line) or .csv (with phone/name columns).</p>
     <div class="file-drop" onclick="document.getElementById('leadFileInput').click()">
-      <div id="leadFileLabel">Click to choose a CSV (phone, name, and optional custom columns)</div>
-      <input type="file" id="leadFileInput" accept=".csv" onchange="document.getElementById('leadFileLabel').textContent=this.files[0]?.name || 'Click to choose a CSV'">
+      <div id="leadFileLabel">Click to upload .txt or .csv</div>
+      <input type="file" id="leadFileInput" accept=".csv,.txt" onchange="document.getElementById('leadFileLabel').textContent=this.files[0]?.name || 'Click to upload .txt or .csv'">
     </div>
-    <p class="hint">Expected columns: a phone/mobile/destination column (required), plus optional name, custom1, custom2. Header names are matched flexibly.</p>
+    <p class="hint">CSV: phone/mobile column required; optional name, custom1, custom2. Text file: one number per line.</p>
     <div class="flex-between">
       <button class="btn-secondary" onclick="closeModal('modal-upload-leads')">Cancel</button>
       <button class="btn-primary" onclick="uploadLeads()">Upload</button>

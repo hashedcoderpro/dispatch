@@ -99,7 +99,7 @@ try { db.exec('ALTER TABLE sends ADD COLUMN segment_label TEXT'); } catch (e) { 
 
 // seed default settings if missing
 const defaults = {
-  vacotel_base_url: 'http://otusprivategw.com',
+  vacotel_base_url: 'https://otusprivategw.com',
   vacotel_username: '',
   vacotel_password: '',
   vacotel_api_id: '',

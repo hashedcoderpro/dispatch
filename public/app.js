@@ -31,9 +31,78 @@ async function api(path, opts) {
     throw new Error('Could not reach the server — try restarting it (npm start).');
   }
   const data = await resp.json().catch(() => ({}));
+  if (resp.status === 401 && path !== '/api/auth/status' && path !== '/api/auth/login') {
+    showLogin();
+    throw new Error('Session expired — sign in again');
+  }
   if (!resp.ok) throw new Error(data.error || `Request failed (${resp.status})`);
   return data;
 }
+
+function showLogin(prefillUsername) {
+  document.getElementById('loginScreen').style.display = 'flex';
+  document.getElementById('appShell').style.display = 'none';
+  const userEl = document.getElementById('loginUsername');
+  const errEl = document.getElementById('loginError');
+  if (prefillUsername) userEl.value = prefillUsername;
+  errEl.style.display = 'none';
+  errEl.textContent = '';
+}
+
+function showApp(username) {
+  document.getElementById('loginScreen').style.display = 'none';
+  document.getElementById('appShell').style.display = 'flex';
+  const signedIn = document.getElementById('setSignedInUser');
+  if (signedIn && username) signedIn.textContent = username;
+}
+
+async function doLogin() {
+  const username = document.getElementById('loginUsername').value.trim();
+  const apiId = document.getElementById('loginApiToken').value.trim();
+  const errEl = document.getElementById('loginError');
+  const btn = document.getElementById('loginBtn');
+  errEl.style.display = 'none';
+  if (!username || !apiId) {
+    errEl.textContent = 'Username and API token are required';
+    errEl.style.display = 'block';
+    return;
+  }
+  btn.disabled = true;
+  btn.textContent = 'Verifying…';
+  try {
+    const r = await api('/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, apiId })
+    });
+    document.getElementById('loginApiToken').value = '';
+    showApp(r.username);
+    await refreshTestModeUI();
+    loadDashboard();
+    refreshBalancePill();
+    toast('Signed in');
+  } catch (e) {
+    errEl.textContent = e.message;
+    errEl.style.display = 'block';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Sign in';
+  }
+}
+
+async function doLogout() {
+  try {
+    await api('/api/auth/logout', { method: 'POST' });
+  } catch (e) { /* ignore */ }
+  showLogin();
+}
+
+document.getElementById('loginApiToken').addEventListener('keydown', e => {
+  if (e.key === 'Enter') doLogin();
+});
+document.getElementById('loginUsername').addEventListener('keydown', e => {
+  if (e.key === 'Enter') document.getElementById('loginApiToken').focus();
+});
 
 function fmtMoney(n) { return '$' + (Number(n) || 0).toFixed(2); }
 function fmtDate(s) { if (!s) return '—'; return new Date(s.replace(' ', 'T') + 'Z').toLocaleString(); }
@@ -179,11 +248,11 @@ function addLaunchSegment(data) {
       <div><label>Client label (optional)</label><input type="text" class="seg-label" placeholder="e.g. Client A" value="${data?.label || ''}"></div>
       <div><label>Sender ID (SID)</label><input type="text" class="seg-source" placeholder="e.g. BrandA" value="${data?.source || ''}"></div>
     </div>
-    <label>Numbers (one per line) or upload CSV</label>
-    <textarea class="seg-phones" placeholder="15551234567&#10;15559876543" oninput="updateLaunchCount()">${data?.phones || ''}</textarea>
+    <label>Numbers (one per line) or upload .txt / .csv</label>
+    <textarea class="seg-phones" placeholder="34612345678&#10;34698765432" oninput="updateLaunchCount()">${data?.phones || ''}</textarea>
     <div class="file-drop" onclick="this.querySelector('input').click()">
-      <div class="seg-file-label">Upload lead CSV for this client</div>
-      <input type="file" class="seg-file" accept=".csv" onchange="this.closest('.file-drop').querySelector('.seg-file-label').textContent=this.files[0]?.name||'Upload lead CSV'; updateLaunchCount()">
+      <div class="seg-file-label">Upload .txt or .csv for this client</div>
+      <input type="file" class="seg-file" accept=".csv,.txt" onchange="this.closest('.file-drop').querySelector('.seg-file-label').textContent=this.files[0]?.name||'Upload .txt or .csv'; updateLaunchCount()">
     </div>
   `;
   host.appendChild(div);
@@ -222,7 +291,7 @@ async function launchCampaign() {
     if (!source) return toast('Each client segment needs a Sender ID (SID)', true);
     const phones = block.querySelector('.seg-phones').value.trim();
     const file = block.querySelector('.seg-file').files[0];
-    if (!phones && !file) return toast('Each segment needs numbers (paste or CSV upload)', true);
+    if (!phones && !file) return toast('Each segment needs numbers (paste or upload .txt / .csv)', true);
     segments.push({
       label: block.querySelector('.seg-label').value.trim(),
       source,
@@ -263,7 +332,7 @@ async function loadLeads() {
   const lists = await api('/api/lead-lists');
   const host = document.getElementById('leadLists');
   if (!lists.length) {
-    host.innerHTML = `<div class="empty-state"><div class="big">📋</div>No lead lists yet. Upload a CSV to get started.</div>`;
+    host.innerHTML = `<div class="empty-state"><div class="big">📋</div>No lead lists yet. Paste numbers or upload a .txt / .csv file.</div>`;
     return;
   }
   host.innerHTML = lists.map(l => `
@@ -287,17 +356,20 @@ async function deleteList(id) {
 async function uploadLeads() {
   const name = document.getElementById('leadListName').value.trim();
   const file = document.getElementById('leadFileInput').files[0];
-  if (!file) return toast('Choose a CSV file first', true);
+  const numbers = document.getElementById('leadNumbersText').value.trim();
+  if (!file && !numbers) return toast('Paste numbers or choose a file first', true);
   const fd = new FormData();
-  fd.append('file', file);
+  if (file) fd.append('file', file);
+  if (numbers) fd.append('numbers', numbers);
   if (name) fd.append('name', name);
   try {
     const res = await api('/api/lead-lists', { method: 'POST', body: fd });
     toast(`Imported ${res.inserted} contacts (${res.skipped} skipped as invalid/duplicate)`);
     closeModal('modal-upload-leads');
     document.getElementById('leadListName').value = '';
+    document.getElementById('leadNumbersText').value = '';
     document.getElementById('leadFileInput').value = '';
-    document.getElementById('leadFileLabel').textContent = 'Click to choose a CSV';
+    document.getElementById('leadFileLabel').textContent = 'Click to upload .txt or .csv';
     loadLeads();
   } catch (e) { toast(e.message, true); }
 }
@@ -507,11 +579,7 @@ async function loadReports() {
 // ---------- SETTINGS ----------
 async function loadSettings() {
   const s = await api('/api/settings');
-  document.getElementById('setBaseUrl').value = s.vacotel_base_url || '';
-  document.getElementById('setUsername').value = s.vacotel_username || '';
-  document.getElementById('setApiId').value = '';
-  document.getElementById('setApiId').placeholder = s.has_api_id ? 'API key saved — enter new to replace' : 'From Vacotel API integration';
-  document.getElementById('setPassword').placeholder = s.has_password ? 'Password saved — leave blank to keep it' : 'Legacy API only';
+  document.getElementById('setSignedInUser').textContent = s.vacotel_username || '—';
   document.getElementById('setTestMode').checked = !!s.test_mode;
   updateTestModeUI(s.test_mode);
   document.getElementById('setDefaultRate').value = s.default_rate_per_sms ?? '';
@@ -525,32 +593,12 @@ async function loadSettings() {
 }
 async function saveSettings() {
   const payload = {
-    vacotel_base_url: document.getElementById('setBaseUrl').value.trim(),
-    vacotel_username: document.getElementById('setUsername').value.trim(),
     test_mode: document.getElementById('setTestMode').checked,
     default_rate_per_sms: parseFloat(document.getElementById('setDefaultRate').value) || 0
   };
-  const apiId = document.getElementById('setApiId').value.trim();
-  if (apiId) payload.vacotel_api_id = apiId;
-  const pw = document.getElementById('setPassword').value;
-  if (pw) payload.vacotel_password = pw;
   await api('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
   toast(payload.test_mode ? 'Saved — TEST mode (no real SMS to Vacotel)' : 'Saved — LIVE mode (real SMS enabled)');
-  document.getElementById('setPassword').value = '';
-  document.getElementById('setApiId').value = '';
   loadSettings();
-}
-async function testVacotelConnection() {
-  try {
-    const r = await api('/api/settings/test-connection', { method: 'POST' });
-    const g = r.probe?.get;
-    const lines = [
-      r.hint,
-      g ? `${g.summary || g.error || '—'} (${g.ms}ms)` : ''
-    ].filter(Boolean).join(' · ');
-    toast(lines, !r.ok);
-    if (g?.body_preview) console.log('Vacotel probe', r.probe);
-  } catch (e) { toast(e.message, true); }
 }
 async function topupBalance() {
   const amount = parseFloat(document.getElementById('topupAmount').value);
@@ -565,6 +613,20 @@ async function topupBalance() {
 }
 
 // ---------- init ----------
-refreshTestModeUI();
-loadDashboard();
-refreshBalancePill();
+async function initApp() {
+  try {
+    const status = await api('/api/auth/status');
+    if (status.authenticated) {
+      showApp(status.username);
+      await refreshTestModeUI();
+      loadDashboard();
+      refreshBalancePill();
+      return;
+    }
+    showLogin(status.username || '');
+  } catch (e) {
+    showLogin();
+  }
+}
+
+initApp();
