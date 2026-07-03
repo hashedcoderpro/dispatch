@@ -44,15 +44,19 @@ function parseApiResponse(bodyText, defaultParts) {
 
   if (json) {
     const sms = (json.SMS && json.SMS[0]) || {};
-    const errorCode = sms.ErrorCode !== undefined ? sms.ErrorCode : json.ErrorCode;
-    const ok = errorCode === 0 || json.success === true || json.Status === 'OK';
+    const rawCode = sms.ErrorCode !== undefined ? sms.ErrorCode : json.ErrorCode;
+    const errorCode = rawCode === undefined || rawCode === null || rawCode === ''
+      ? null
+      : Number(rawCode);
+    const description = sms.ErrorDescription || json.ErrorDescription || json.Description || json.message || json.Status || '';
+    const ok = errorCode === 0 || json.success === true || json.Status === 'OK' || /^success$/i.test(description);
     return {
       ok,
-      errorCode: errorCode ?? (ok ? 0 : -10),
-      errorDescription: json.ErrorDescription || json.message || json.Status || bodyText.slice(0, 200),
-      vendorId: sms.Id || json.messageId || json.MessageId || null,
-      messageCount: json.MessageCount || 1,
-      messageParts: json.MessageParts || defaultParts,
+      errorCode: Number.isFinite(errorCode) ? errorCode : (ok ? 0 : -10),
+      errorDescription: description || bodyText.slice(0, 200),
+      vendorId: json.Id || sms.Id || json.messageId || json.MessageId || null,
+      messageCount: json.MessageCount || sms.MessageCount || 1,
+      messageParts: json.MessageParts || sms.MessageParts || defaultParts,
       raw: json
     };
   }
@@ -164,7 +168,9 @@ async function probeVacotelApi({ baseUrl, username, password, apiId }) {
     summary = 'Invalid credentials';
   } else if (result.errorCode === -8) {
     auth_ok = false;
-    summary = 'IP not whitelisted';
+    summary = /ip|whitelist/i.test(result.errorDescription || '')
+      ? 'IP not whitelisted'
+      : (result.errorDescription || 'Request rejected (code -8)');
   } else if (result.errorCode === -3 || result.errorCode === -4) {
     auth_ok = true;
     summary = 'API reachable (destination rejected — expected for probe)';

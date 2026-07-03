@@ -129,9 +129,13 @@ async function loadDashboard() {
   `).join('');
 
   const tbody = document.querySelector('#errorTable tbody');
-  tbody.innerHTML = data.byErrorCode.length
-    ? data.byErrorCode.map(r => `<tr><td class="mono">${r.send_error_code}</td><td>${r.description}</td><td>${r.count}</td></tr>`).join('')
-    : `<tr><td colspan="3" class="empty-state">No failed sends yet.</td></tr>`;
+  if (data.legacyFailed > 0 && !data.byErrorCode.length) {
+    tbody.innerHTML = `<tr><td colspan="3" class="empty-state">No failed sends in the last 7 days. (${data.legacyFailed} older failure${data.legacyFailed !== 1 ? 's' : ''} from before — not shown.)</td></tr>`;
+  } else {
+    tbody.innerHTML = data.byErrorCode.length
+      ? data.byErrorCode.map(r => `<tr><td class="mono">${r.send_error_code}</td><td>${r.description}</td><td>${r.count}</td></tr>`).join('')
+      : `<tr><td colspan="3" class="empty-state">No failed sends in the last 7 days.</td></tr>`;
+  }
 
   refreshBalancePill();
 }

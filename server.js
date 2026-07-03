@@ -831,9 +831,15 @@ app.get('/api/reports/summary', (req, res) => {
     FROM sends
   `).get();
   const byErrorCode = db.prepare(`
-    SELECT send_error_code, COUNT(*) as count FROM sends WHERE send_status = 'failed' GROUP BY send_error_code
+    SELECT send_error_code, COUNT(*) as count FROM sends
+    WHERE send_status = 'failed' AND sent_at >= datetime('now', '-7 days')
+    GROUP BY send_error_code
   `).all().map(r => ({ ...r, description: ERROR_CODES[String(r.send_error_code)] || 'Unknown' }));
-  res.json({ stats, byErrorCode, balance: currentBalance() });
+  const legacyFailed = db.prepare(`
+    SELECT COUNT(*) as count FROM sends
+    WHERE send_status = 'failed' AND (sent_at IS NULL OR sent_at < datetime('now', '-7 days'))
+  `).get().count;
+  res.json({ stats, byErrorCode, legacyFailed, balance: currentBalance() });
 });
 
 app.get('/api/campaigns/:id/export.csv', (req, res) => {
