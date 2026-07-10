@@ -228,16 +228,37 @@ async function adminPortalFetch(jar, path, { method = 'GET', body, contentType, 
     headers['Content-Type'] = contentType || 'application/x-www-form-urlencoded; charset=UTF-8';
   }
   const resp = await fetch(`${OTUS_BASE_URL}${path}`, { method, headers, body });
+  mergeCookies(jar, resp.headers);
   const text = await resp.text();
   let json = null;
   try { json = JSON.parse(text); } catch (_) {}
   return { status: resp.status, json, text };
 }
 
+function adminResponseOk(json) {
+  if (!json || typeof json !== 'object') return false;
+  if (json.status === 'Success' || json.status === 'success') return true;
+  if (json.result === true || json.result === 'True') return true;
+  if (json.success === true || json.success === 'True') return true;
+  return false;
+}
+
+function adminSessionExpired(status, text, json) {
+  if (adminResponseOk(json)) return false;
+  if (Array.isArray(json?.data)) return false;
+  if (status === 401 || status === 403) return true;
+  const raw = String(text || '').trim();
+  if (!raw) return false;
+  if (raw.startsWith('{') || raw.startsWith('[')) return false;
+  return /\/Account\/Login|name="user\[username\]"|Login - OTUS/i.test(raw);
+}
+
 async function verifyAdminAccess(jar) {
   const { status, json, text } = await adminPortalFetch(jar, '/Admin/Accounts/Read');
   if (json && Array.isArray(json.data)) return { ok: true };
-  if (/login/i.test(text)) return { ok: false, error: 'Not an admin account — use Otus admin credentials' };
+  if (adminSessionExpired(status, text, json)) {
+    return { ok: false, error: 'Not an admin account — use Otus admin credentials' };
+  }
   return { ok: false, status, error: text.slice(0, 120) || `Admin access check failed (${status})` };
 }
 
@@ -246,7 +267,9 @@ async function getAdminBalance(jar) {
     method: 'POST',
     body: ''
   });
-  if (/login/i.test(text)) return { ok: false, error: 'Admin session expired', needsRefresh: true };
+  if (adminSessionExpired(status, text)) {
+    return { ok: false, error: 'Admin session expired', needsRefresh: true };
+  }
   const parsed = parseBalanceText(text);
   if (!parsed) {
     return { ok: false, status, error: text.slice(0, 100) || `Admin balance fetch failed (${status})` };
@@ -257,7 +280,9 @@ async function getAdminBalance(jar) {
 async function listAdminAccounts(jar) {
   const { status, json, text } = await adminPortalFetch(jar, '/Admin/Accounts/Read');
   if (!json || !Array.isArray(json.data)) {
-    if (/login/i.test(text)) return { ok: false, error: 'Admin session expired', needsRefresh: true };
+    if (adminSessionExpired(status, text, json)) {
+      return { ok: false, error: 'Admin session expired', needsRefresh: true };
+    }
     return { ok: false, status, error: text.slice(0, 200) || `Account list failed (${status})`, accounts: [] };
   }
   return {
@@ -275,9 +300,11 @@ async function addBalanceToAccount(jar, accountId, amount) {
       accountId: String(accountId)
     }).toString()
   });
-  if (/login/i.test(text)) return { ok: false, error: 'Admin session expired', needsRefresh: true };
-  if (json && (json.success === true || json.success === 'True' || json.status === 'Success')) {
+  if (adminResponseOk(json)) {
     return { ok: true, message: json.message || json.description || 'Balance updated' };
+  }
+  if (adminSessionExpired(status, text, json)) {
+    return { ok: false, error: 'Admin session expired', needsRefresh: true };
   }
   return {
     ok: false,
@@ -339,7 +366,9 @@ async function getEditAccountForm(jar, accountId) {
     jar,
     `/Admin/Accounts/EditAccount?subAccountId=${encodeURIComponent(accountId)}`
   );
-  if (/login/i.test(text)) return { ok: false, error: 'Admin session expired', needsRefresh: true };
+  if (adminSessionExpired(status, text)) {
+    return { ok: false, error: 'Admin session expired', needsRefresh: true };
+  }
   if (!text.includes('AccountId')) {
     return { ok: false, status, error: text.slice(0, 200) || `Could not load account (${status})` };
   }
@@ -374,8 +403,10 @@ async function editAccountUser(jar, fields) {
     method: 'POST',
     body: body.toString()
   });
-  if (/login/i.test(text)) return { ok: false, error: 'Admin session expired', needsRefresh: true };
-  if (json && json.status === 'Success') return { ok: true };
+  if (adminResponseOk(json)) return { ok: true };
+  if (adminSessionExpired(status, text, json)) {
+    return { ok: false, error: 'Admin session expired', needsRefresh: true };
+  }
   return {
     ok: false,
     error: (json && (json.message || json.error)) || text.slice(0, 200) || `Edit user failed (${status})`
@@ -398,7 +429,9 @@ async function listAdminSenderIds(jar) {
     { referer: `${OTUS_BASE_URL}/Admin/SenderIds/Index` }
   );
   if (!json || !Array.isArray(json.data)) {
-    if (/login/i.test(text)) return { ok: false, error: 'Admin session expired', needsRefresh: true };
+    if (adminSessionExpired(status, text, json)) {
+      return { ok: false, error: 'Admin session expired', needsRefresh: true };
+    }
     return { ok: false, status, error: text.slice(0, 200) || `Sender ID list failed (${status})`, items: [] };
   }
   return { ok: true, items: json.data };
@@ -419,9 +452,11 @@ async function updateSenderIdStatus(jar, allowedSenderIds, status) {
       referer: `${OTUS_BASE_URL}/Admin/SenderIds/Index`
     }
   );
-  if (/login/i.test(text)) return { ok: false, error: 'Admin session expired', needsRefresh: true };
-  if (json && json.result) {
-    return { ok: true, message: json.Description || json.description || 'Updated' };
+  if (adminResponseOk(json) || (json && json.result)) {
+    return { ok: true, message: json.Description || json.description || json.message || 'Updated' };
+  }
+  if (adminSessionExpired(httpStatus, text, json)) {
+    return { ok: false, error: 'Admin session expired', needsRefresh: true };
   }
   return {
     ok: false,

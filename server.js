@@ -222,6 +222,9 @@ async function withAdminPortalSession(fn) {
     if (!session.ok) return session;
     result = await fn(session.cookies);
   }
+  if (!result.needsRefresh && session.cookies) {
+    setSetting('otus_admin_portal_cookies', JSON.stringify(session.cookies));
+  }
   return result;
 }
 
