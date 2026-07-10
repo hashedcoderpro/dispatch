@@ -29,27 +29,32 @@ function validateSenderId(sender) {
 async function portalLogin(username, password) {
   const jar = {};
   const getResp = await fetch(`${OTUS_BASE_URL}/`, {
-    headers: { 'User-Agent': 'Dispatch/1.0' }
+    headers: { 'User-Agent': 'Dispatch/1.0', Accept: 'text/html' }
   });
   mergeCookies(jar, getResp.headers);
   const html = await getResp.text();
   const tokenMatch = html.match(/name="__RequestVerificationToken"[^>]*value="([^"]+)"/i);
   const token = tokenMatch ? tokenMatch[1] : '';
 
+  // Otus login page uses jQuery $.ajax with form-urlencoded (not JSON).
+  const body = new URLSearchParams({
+    __RequestVerificationToken: token,
+    'user[username]': username,
+    'user[password]': password,
+    returnUrl: '',
+    key: ''
+  });
+
   const loginResp = await fetch(`${OTUS_BASE_URL}/Account/Login`, {
     method: 'POST',
     headers: {
-      'Content-Type': 'application/json',
+      'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
       'Accept': 'application/json, text/javascript, */*; q=0.01',
       'X-Requested-With': 'XMLHttpRequest',
       'Cookie': cookieHeader(jar),
       'User-Agent': 'Dispatch/1.0'
     },
-    body: JSON.stringify({
-      __RequestVerificationToken: token,
-      user: { username, password },
-      returnUrl: ''
-    })
+    body: body.toString()
   });
   mergeCookies(jar, loginResp.headers);
 
@@ -57,14 +62,19 @@ async function portalLogin(username, password) {
   const text = await loginResp.text();
   try { data = JSON.parse(text); } catch (_) { data = { raw: text.slice(0, 300) }; }
 
-  if (!jar['vacotel-Cookie']) {
-    const msg = data.message || data.description || data.error
-      || (data.tfaEnabled ? 'Two-factor authentication is enabled — sign in at otusprivategw.com' : null)
-      || 'Portal login failed — check username and password';
-    return { ok: false, error: msg };
+  const success = data.success === 'True' || data.success === true;
+  if (success && data.tfaEnabled) {
+    return { ok: false, error: 'Two-factor authentication is required on this account — sign in at otusprivategw.com or disable 2FA' };
+  }
+  if (success) {
+    return { ok: true, cookies: jar };
   }
 
-  return { ok: true, cookies: jar };
+  const msg = data.errorMessage || data.message || data.description || data.error
+    || (data.success === 'False' ? 'Invalid portal username or password' : null)
+    || (typeof data.raw === 'string' && data.raw.includes('login') ? 'Unexpected login response from Otus portal' : null)
+    || 'Portal login failed — check username and password';
+  return { ok: false, error: msg, raw: data };
 }
 
 async function portalFetch(jar, path, { method = 'GET', body } = {}) {
@@ -123,7 +133,9 @@ function parseStoredCookies(raw) {
   if (!raw) return null;
   try {
     const jar = JSON.parse(raw);
-    return jar && jar['vacotel-Cookie'] ? jar : null;
+    if (!jar) return null;
+    if (jar['vacotel-Cookie'] || jar['.AspNetCore.Session']) return jar;
+    return null;
   } catch {
     return null;
   }

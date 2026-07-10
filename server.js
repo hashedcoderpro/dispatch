@@ -292,12 +292,13 @@ app.post('/api/auth/login', async (req, res) => {
   });
   const check = validateVacotelCredentials(probe);
   if (!check.ok) {
-    return res.status(401).json({ error: check.error });
+    return res.status(401).json({ error: `API token check failed: ${check.error}` });
   }
 
   const portal = await portalLogin(username, password);
   if (!portal.ok) {
-    return res.status(401).json({ error: portal.error });
+    console.error('Portal login failed:', portal.error, portal.raw ? JSON.stringify(portal.raw).slice(0, 200) : '');
+    return res.status(401).json({ error: `Portal login failed: ${portal.error}` });
   }
 
   setSetting('vacotel_username', username);
