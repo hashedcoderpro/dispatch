@@ -17,6 +17,13 @@ const {
 const {
   parseLines, parsePhones, buildInterleavedQueue, buildCartesianQueue, assignTemplates, estimateCost
 } = require('./sendHelpers');
+const {
+  portalLogin,
+  requestSenderId,
+  listSenderIds,
+  parseStoredCookies,
+  validateSenderId
+} = require('./otusPortalClient');
 
 const app = express();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
@@ -98,6 +105,43 @@ function getSetting(key) {
 }
 function setSetting(key, value) {
   db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(key, value);
+}
+
+async function refreshPortalSession() {
+  const username = getSetting('vacotel_username');
+  const password = getSetting('vacotel_password');
+  if (!username || !password) return { ok: false, error: 'Portal password not configured' };
+  const login = await portalLogin(username, password);
+  if (!login.ok) {
+    setSetting('otus_portal_cookies', '');
+    return login;
+  }
+  setSetting('otus_portal_cookies', JSON.stringify(login.cookies));
+  return { ok: true, cookies: login.cookies };
+}
+
+async function getPortalCookies({ forceRefresh } = {}) {
+  if (!forceRefresh) {
+    const jar = parseStoredCookies(getSetting('otus_portal_cookies'));
+    if (jar) return { ok: true, cookies: jar };
+  }
+  return refreshPortalSession();
+}
+
+async function withPortalSession(fn) {
+  let session = await getPortalCookies();
+  if (!session.ok) return session;
+  let result = await fn(session.cookies);
+  if (result.needsRefresh) {
+    session = await getPortalCookies({ forceRefresh: true });
+    if (!session.ok) return session;
+    result = await fn(session.cookies);
+  }
+  return result;
+}
+
+function portalSessionExpired(status, text) {
+  return status === 401 || status === 403 || /login|unauthorized|session/i.test(text || '');
 }
 function currentBalance() {
   const row = db.prepare('SELECT COALESCE(SUM(amount), 0) as bal FROM balance_transactions').get();
@@ -228,15 +272,17 @@ app.get('/api/auth/status', (req, res) => {
   const username = verifySession(req);
   res.json({
     authenticated: !!username,
-    username: username || getSetting('vacotel_username') || null
+    username: username || getSetting('vacotel_username') || null,
+    portal_connected: !!parseStoredCookies(getSetting('otus_portal_cookies'))
   });
 });
 
 app.post('/api/auth/login', async (req, res) => {
   const username = String(req.body.username || '').trim();
+  const password = String(req.body.password || '');
   const apiId = String(req.body.apiId || '').trim();
-  if (!username || !apiId) {
-    return res.status(400).json({ error: 'Username and API token are required' });
+  if (!username || !password || !apiId) {
+    return res.status(400).json({ error: 'Username, password, and API token are all required' });
   }
 
   const probe = await probeVacotelApi({
@@ -249,15 +295,23 @@ app.post('/api/auth/login', async (req, res) => {
     return res.status(401).json({ error: check.error });
   }
 
+  const portal = await portalLogin(username, password);
+  if (!portal.ok) {
+    return res.status(401).json({ error: portal.error });
+  }
+
   setSetting('vacotel_username', username);
+  setSetting('vacotel_password', password);
   setSetting('vacotel_api_id', apiId);
   setSetting('vacotel_base_url', VACOTEL_GATEWAY_URL);
+  setSetting('otus_portal_cookies', JSON.stringify(portal.cookies));
   setSessionCookie(res, username);
-  res.json({ ok: true, username });
+  res.json({ ok: true, username, portal_connected: true });
 });
 
 app.post('/api/auth/logout', (req, res) => {
   clearSessionCookie(res);
+  setSetting('otus_portal_cookies', '');
   res.json({ ok: true });
 });
 
@@ -275,6 +329,83 @@ app.post('/api/settings', (req, res) => {
   if (test_mode !== undefined) setSetting('test_mode', test_mode ? '1' : '0');
   if (default_rate_per_sms !== undefined) setSetting('default_rate_per_sms', String(default_rate_per_sms));
   res.json({ ok: true, test_mode: getSetting('test_mode') === '1' });
+});
+
+// ---------- sender IDs (Otus portal) ----------
+app.get('/api/sender-ids', async (req, res) => {
+  try {
+    const result = await withPortalSession(async (cookies) => {
+      const list = await listSenderIds(cookies);
+      if (!list.ok && portalSessionExpired(list.status, list.error)) {
+        return { needsRefresh: true };
+      }
+      return list;
+    });
+    if (result.needsRefresh) {
+      return res.status(401).json({ error: 'Portal session expired — sign in again' });
+    }
+    if (!result.ok) {
+      return res.status(502).json({ error: result.error || 'Could not load sender IDs from Otus' });
+    }
+
+    const local = db.prepare(`
+      SELECT id, source, otus_sender_id, status, description, created_at, updated_at
+      FROM sender_id_requests ORDER BY id DESC LIMIT 100
+    `).all();
+
+    res.json({
+      otus: result.items.map(item => ({
+        otus_sender_id: item.SenderId,
+        source: item.Sender,
+        status: item.Status,
+        active: item.Active,
+        created_date: item.CreatedDate
+      })),
+      requests: local
+    });
+  } catch (e) {
+    console.error('List sender IDs error:', e);
+    res.status(500).json({ error: e.message || 'Failed to list sender IDs' });
+  }
+});
+
+app.post('/api/sender-ids/request', async (req, res) => {
+  const source = String(req.body.source || '').trim();
+  const check = validateSenderId(source);
+  if (!check.ok) return res.status(400).json({ error: check.error });
+
+  try {
+    const result = await withPortalSession(async (cookies) => {
+      const out = await requestSenderId(cookies, source);
+      if (!out.ok && /login|session|unauthorized/i.test(out.error || '')) {
+        return { needsRefresh: true };
+      }
+      return out;
+    });
+    if (result.needsRefresh) {
+      return res.status(401).json({ error: 'Portal session expired — sign in again' });
+    }
+    if (!result.ok) {
+      return res.status(400).json({ error: result.error || 'Sender ID request rejected' });
+    }
+
+    const info = db.prepare(`
+      INSERT INTO sender_id_requests (requested_by, source, otus_sender_id, status, description, updated_at)
+      VALUES (?, ?, ?, 'pending', ?, datetime('now'))
+    `).run(req.sessionUsername, result.sender, result.senderId, result.description || 'Submitted to Vacotel for approval');
+
+    res.json({
+      ok: true,
+      id: info.lastInsertRowid,
+      source: result.sender,
+      otus_sender_id: result.senderId,
+      status: 'pending',
+      description: result.description || 'Submitted to Vacotel for approval'
+    });
+  } catch (e) {
+    console.error('Request sender ID error:', e);
+    res.status(500).json({ error: e.message || 'Failed to request sender ID' });
+  }
 });
 
 // ---------- balance ----------

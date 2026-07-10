@@ -15,11 +15,13 @@
       Dispatch
     </div>
     <p class="login-sub">Vacotel SMS Console</p>
-    <p class="hint" style="margin-top:0;">Sign in with your Vacotel username and API token from the portal integration page.</p>
+    <p class="hint" style="margin-top:0;">Sign in with your Otus/Vacotel portal credentials. All three are required — the API token is used for sending SMS; username and password establish your portal session for sender ID requests.</p>
     <label>Username</label>
     <input type="text" id="loginUsername" placeholder="e.g. ClientOtus" autocomplete="username">
+    <label>Portal password</label>
+    <input type="password" id="loginPassword" placeholder="Your otusprivategw.com password" autocomplete="current-password">
     <label>API token</label>
-    <input type="password" id="loginApiToken" placeholder="From Vacotel → API integration" autocomplete="current-password">
+    <input type="password" id="loginApiToken" placeholder="From Vacotel → API integration" autocomplete="off">
     <p id="loginError" class="login-error" style="display:none;"></p>
     <button class="btn-primary login-btn" id="loginBtn" onclick="doLogin()">Sign in</button>
   </div>
@@ -37,6 +39,7 @@
     <div class="nav">
       <button class="nav-item active" data-page="dashboard"><span class="dot"></span>Dashboard</button>
       <button class="nav-item" data-page="send"><span class="dot"></span>Send SMS</button>
+      <button class="nav-item" data-page="sender-ids"><span class="dot"></span>Sender IDs</button>
       <button class="nav-item" data-page="campaigns"><span class="dot"></span>Launch Campaign</button>
       <button class="nav-item" data-page="leads"><span class="dot"></span>Lead Lists</button>
       <button class="nav-item" data-page="messages"><span class="dot"></span>Message Rosters</button>
@@ -114,6 +117,33 @@
         </div>
         <div id="qsPreviewWrap" style="margin-top:14px;"></div>
       </div>
+    </div>
+
+    <!-- SENDER IDs -->
+    <div class="page" id="page-sender-ids">
+      <div class="page-header">
+        <div>
+          <h1>Sender IDs</h1>
+          <p>Request and view sender IDs on your Otus account — no need to open otusprivategw.com separately.</p>
+        </div>
+      </div>
+      <div class="card" style="max-width:480px; margin-bottom:20px;">
+        <div class="section-title" style="margin-top:0;">Request new sender ID</div>
+        <p class="hint" style="margin-top:0;">Alphanumeric, max 15 characters. Vacotel must approve before you can send with it.</p>
+        <label>Sender ID</label>
+        <input type="text" id="sidRequestInput" placeholder="e.g. YourBrand" maxlength="15">
+        <button class="btn-primary" style="margin-top:10px;" onclick="requestSenderId()">Submit request</button>
+      </div>
+      <div class="section-title">On your Otus account</div>
+      <div class="table-wrap"><table id="otusSidTable">
+        <thead><tr><th>Sender ID</th><th>Status</th><th>Otus ID</th></tr></thead>
+        <tbody></tbody>
+      </table></div>
+      <div class="section-title" style="margin-top:20px;">Requests via Dispatch</div>
+      <div class="table-wrap"><table id="localSidTable">
+        <thead><tr><th>Sender ID</th><th>Status</th><th>Requested</th><th>Note</th></tr></thead>
+        <tbody></tbody>
+      </table></div>
     </div>
 
     <!-- CAMPAIGNS / LAUNCH -->

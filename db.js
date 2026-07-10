@@ -97,12 +97,26 @@ CREATE TABLE IF NOT EXISTS campaign_segments (
 try { db.exec('ALTER TABLE sends ADD COLUMN source TEXT'); } catch (e) { /* already exists */ }
 try { db.exec('ALTER TABLE sends ADD COLUMN segment_label TEXT'); } catch (e) { /* already exists */ }
 
+db.exec(`
+CREATE TABLE IF NOT EXISTS sender_id_requests (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  requested_by TEXT NOT NULL,
+  source TEXT NOT NULL,
+  otus_sender_id INTEGER,
+  status TEXT NOT NULL DEFAULT 'pending',
+  description TEXT,
+  created_at TEXT DEFAULT (datetime('now')),
+  updated_at TEXT
+);
+`);
+
 // seed default settings if missing
 const defaults = {
   vacotel_base_url: 'https://otusprivategw.com',
   vacotel_username: '',
   vacotel_password: '',
   vacotel_api_id: '',
+  otus_portal_cookies: '',
   test_mode: '1',
   default_rate_per_sms: '0.01'
 };

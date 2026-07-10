@@ -7,7 +7,7 @@ function showPage(name) {
   document.querySelectorAll('.nav-item').forEach(b => b.classList.remove('active'));
   document.getElementById('page-' + name).classList.add('active');
   document.querySelector(`.nav-item[data-page="${name}"]`).classList.add('active');
-  const loaders = { dashboard: loadDashboard, send: loadSendPage, leads: loadLeads, messages: loadRosters, campaigns: loadCampaigns, reports: loadReports, settings: loadSettings };
+  const loaders = { dashboard: loadDashboard, send: loadSendPage, 'sender-ids': loadSenderIds, leads: loadLeads, messages: loadRosters, campaigns: loadCampaigns, reports: loadReports, settings: loadSettings };
   loaders[name] && loaders[name]();
 }
 
@@ -58,29 +58,31 @@ function showApp(username) {
 
 async function doLogin() {
   const username = document.getElementById('loginUsername').value.trim();
+  const password = document.getElementById('loginPassword').value;
   const apiId = document.getElementById('loginApiToken').value.trim();
   const errEl = document.getElementById('loginError');
   const btn = document.getElementById('loginBtn');
   errEl.style.display = 'none';
-  if (!username || !apiId) {
-    errEl.textContent = 'Username and API token are required';
+  if (!username || !password || !apiId) {
+    errEl.textContent = 'Username, portal password, and API token are all required';
     errEl.style.display = 'block';
     return;
   }
   btn.disabled = true;
-  btn.textContent = 'Verifying…';
+  btn.textContent = 'Signing in…';
   try {
     const r = await api('/api/auth/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username, apiId })
+      body: JSON.stringify({ username, password, apiId })
     });
+    document.getElementById('loginPassword').value = '';
     document.getElementById('loginApiToken').value = '';
     showApp(r.username);
     await refreshTestModeUI();
     loadDashboard();
     refreshBalancePill();
-    toast('Signed in');
+    toast('Signed in — portal session active');
   } catch (e) {
     errEl.textContent = e.message;
     errEl.style.display = 'block';
@@ -98,6 +100,9 @@ async function doLogout() {
 }
 
 document.getElementById('loginApiToken').addEventListener('keydown', e => {
+  if (e.key === 'Enter') doLogin();
+});
+document.getElementById('loginPassword').addEventListener('keydown', e => {
   if (e.key === 'Enter') doLogin();
 });
 document.getElementById('loginUsername').addEventListener('keydown', e => {
@@ -270,6 +275,48 @@ async function sendQuickSms() {
     toast(`Sending ${res.total_sms} SMS — check Reports for results`);
     document.getElementById('qsPreviewWrap').innerHTML = '';
     refreshBalancePill();
+  } catch (e) { toast(e.message, true); }
+}
+
+// ---------- SENDER IDs ----------
+async function loadSenderIds() {
+  try {
+    const data = await api('/api/sender-ids');
+    const otusBody = document.querySelector('#otusSidTable tbody');
+    otusBody.innerHTML = (data.otus || []).length
+      ? data.otus.map(s => `<tr>
+          <td class="mono">${escapeHtml(s.source)}</td>
+          <td>${escapeHtml(s.status || '—')}</td>
+          <td class="mono">${s.otus_sender_id ?? '—'}</td>
+        </tr>`).join('')
+      : '<tr><td colspan="3" class="muted">No sender IDs on account yet</td></tr>';
+
+    const localBody = document.querySelector('#localSidTable tbody');
+    localBody.innerHTML = (data.requests || []).length
+      ? data.requests.map(r => `<tr>
+          <td class="mono">${escapeHtml(r.source)}</td>
+          <td>${escapeHtml(r.status)}</td>
+          <td class="mono">${escapeHtml(r.created_at || '')}</td>
+          <td>${escapeHtml(r.description || '')}</td>
+        </tr>`).join('')
+      : '<tr><td colspan="4" class="muted">No requests submitted via Dispatch yet</td></tr>';
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+async function requestSenderId() {
+  const source = document.getElementById('sidRequestInput').value.trim();
+  if (!source) return toast('Enter a sender ID', true);
+  try {
+    const res = await api('/api/sender-ids/request', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ source })
+    });
+    document.getElementById('sidRequestInput').value = '';
+    toast(`Request submitted for "${res.source}" — pending Vacotel approval`);
+    loadSenderIds();
   } catch (e) { toast(e.message, true); }
 }
 
