@@ -91,15 +91,12 @@
         </div>
         <div class="card">
           <div class="section-title" style="margin-top:0;">Content</div>
-          <label>Message (single message — or leave blank if uploading a file)</label>
-          <textarea id="qsMessage" placeholder="Your SMS text here..." oninput="updateQuickSendCount()"></textarea>
-          <div class="file-drop-wrap" id="qsMessageFileWrap">
-            <div class="file-drop" onclick="document.getElementById('qsMessageFile').click()">
-              <div id="qsMessageFileLabel">Or upload .txt / .csv — one message per line</div>
-              <input type="file" id="qsMessageFile" accept=".csv,.txt" onchange="onQsMessageFile(this)">
-            </div>
-            <button type="button" class="file-drop-close" title="Remove file" onclick="event.stopPropagation(); clearQsMessageFile()">×</button>
-          </div>
+          <label>Test message</label>
+          <select id="qsSegment" onchange="updateQuickSendCount()">
+            <option value="m">M</option>
+            <option value="p">P</option>
+          </select>
+          <p class="hint" id="qsTemplateHint" style="margin-top:8px;">Templates are configured by admin.</p>
         </div>
       </div>
       <div class="card" style="margin-top:14px;">
@@ -144,7 +141,7 @@
       <div class="page-header">
         <div>
           <h1>Launch Campaign</h1>
-          <p>One campaign — pick a sender ID, upload leads and message variants, then preview and send.</p>
+          <p>Upload leads, pick a message segment (M or P), then preview and send.</p>
         </div>
       </div>
 
@@ -163,15 +160,12 @@
           </div>
           <button type="button" class="file-drop-close" title="Remove file" onclick="event.stopPropagation(); clearLaunchLeadsFile()">×</button>
         </div>
-        <label>Messages — one variant per line (rotated across leads)</label>
-        <textarea id="launchMessages" placeholder="Hi {name}, following up...&#10;Hey {name} — quick note..." style="min-height:100px;" oninput="updateLaunchCount()"></textarea>
-        <div class="file-drop-wrap" id="launchMessageFileWrap">
-          <div class="file-drop" onclick="document.getElementById('launchMessageFile').click()">
-            <div id="launchMessageFileLabel">Upload message file (.txt/.csv)</div>
-            <input type="file" id="launchMessageFile" accept=".csv,.txt" onchange="onLaunchMessageFile(this)">
-          </div>
-          <button type="button" class="file-drop-close" title="Remove file" onclick="event.stopPropagation(); clearLaunchMessageFile()">×</button>
-        </div>
+        <label>Campaign message</label>
+        <select id="launchSegment" onchange="updateLaunchCount()">
+          <option value="m">M</option>
+          <option value="p">P</option>
+        </select>
+        <p class="hint" id="launchTemplateHint" style="margin-top:4px;">Campaign templates are configured by admin.</p>
         <div class="field-row">
           <div>
             <label>Rotation</label>
@@ -298,6 +292,17 @@
 </div>
 
 <div id="toastHost"></div>
+
+<div class="modal-overlay" id="modal-confirm-send" style="display:none;">
+  <div class="modal confirm-modal" style="width:440px;">
+    <h2 id="confirmSendTitle">Confirm send</h2>
+    <div id="confirmSendBody"></div>
+    <div class="flex-between" style="margin-top:20px;">
+      <button class="btn-secondary" onclick="closeConfirmSend(false)">Cancel</button>
+      <button class="btn-primary" id="confirmSendBtn" onclick="closeConfirmSend(true)">Send now</button>
+    </div>
+  </div>
+</div>
 
 <script src="app.js"></script>
 </body>

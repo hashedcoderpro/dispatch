@@ -262,3 +262,8 @@ tr:last-child td { border-bottom: none; }
   font-size: 13px;
   margin: 0 0 10px;
 }
+.confirm-modal .confirm-stat { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 14px; }
+.confirm-modal .confirm-stat:last-of-type { border-bottom: none; }
+.confirm-modal .confirm-mode { display: inline-block; font-size: 11px; font-weight: 600; padding: 3px 8px; border-radius: 4px; margin-bottom: 12px; }
+.confirm-modal .confirm-mode.mode-test { background: rgba(255,176,32,0.15); color: var(--warn); }
+.confirm-modal .confirm-mode.mode-live { background: rgba(255,92,114,0.15); color: var(--fail); }

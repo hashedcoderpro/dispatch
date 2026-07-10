@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Dispatch Admin</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div id="loginScreen" class="login-screen">
+  <div class="login-card">
+    <div class="brand-mark" style="margin-bottom:6px;">
+      <span class="bars"><span></span><span></span><span></span><span></span></span>
+      Dispatch
+    </div>
+    <p class="login-sub">Admin Console</p>
+    <p class="hint" style="margin-top:0;">Sign in with your Otus admin portal credentials. No API token required.</p>
+    <label>Username</label>
+    <input type="text" id="loginUsername" placeholder="Admin username" autocomplete="username">
+    <label>Password</label>
+    <input type="password" id="loginPassword" placeholder="Portal password" autocomplete="current-password">
+    <p id="loginError" class="login-error" style="display:none;"></p>
+    <button class="btn-primary login-btn" id="loginBtn" onclick="doLogin()">Sign in</button>
+  </div>
+</div>
+
+<div class="shell" id="appShell" style="display:none;">
+  <div class="sidebar">
+    <div class="brand">
+      <div class="brand-mark">
+        <span class="bars"><span></span><span></span><span></span><span></span></span>
+        Dispatch
+      </div>
+      <div class="brand-sub">Admin Console</div>
+    </div>
+    <div class="nav">
+      <button class="nav-item active" data-page="dashboard"><span class="dot"></span>Dashboard</button>
+      <button class="nav-item" data-page="accounts"><span class="dot"></span>Accounts</button>
+      <button class="nav-item" data-page="templates"><span class="dot"></span>Templates</button>
+      <button class="nav-item" data-page="sender-ids"><span class="dot"></span>Sender IDs</button>
+    </div>
+    <div class="sidebar-footer">
+      <div class="balance-pill">
+        <div>
+          <div class="label">Main balance</div>
+          <div class="amount" id="sidebarBalance">€0.00</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="main">
+    <div class="page active" id="page-dashboard">
+      <div class="page-header">
+        <div>
+          <h1>Dashboard</h1>
+          <p>Otus admin account overview.</p>
+        </div>
+      </div>
+      <div class="grid cols-2" id="dashStats"></div>
+      <div class="card" style="margin-top:16px;">
+        <div class="section-title" style="margin-top:0;">SID auto-approve</div>
+        <p class="hint" style="margin-top:0;">Automatically approves pending sender IDs using stored admin credentials.</p>
+        <label style="display:flex; align-items:center; gap:8px; margin-bottom:10px;">
+          <input type="checkbox" id="sidAutoEnabled" style="width:auto; margin:0;"> Enable auto-approve
+        </label>
+        <label>Check interval (minutes)</label>
+        <input type="number" id="sidAutoInterval" value="3" min="1" style="max-width:120px;">
+        <button class="btn-primary" style="margin-top:10px;" onclick="saveSidAuto()">Save</button>
+        <div id="sidAutoStatus" class="hint" style="margin-top:12px;"></div>
+      </div>
+    </div>
+
+    <div class="page" id="page-accounts">
+      <div class="page-header">
+        <div>
+          <h1>Accounts</h1>
+          <p>Manage client balances and SMS routes.</p>
+        </div>
+      </div>
+      <div class="card" style="margin-bottom:16px;">
+        <label>Search</label>
+        <input type="text" id="accountSearch" placeholder="Username, email, or mobile" oninput="filterAccounts()">
+      </div>
+      <div class="table-wrap"><table id="accountsTable">
+        <thead><tr><th>Name</th><th>Email</th><th>Mobile</th><th>Balance</th><th>Route</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table></div>
+    </div>
+
+    <div class="page" id="page-templates">
+      <div class="page-header">
+        <div>
+          <h1>Message templates</h1>
+          <p>One message per line. Users pick M or P segment when sending.</p>
+        </div>
+      </div>
+      <div class="grid cols-2">
+        <div class="card">
+          <div class="section-title" style="margin-top:0;">Test — M</div>
+          <textarea id="tplTestM" placeholder="Test message lines for M segment..." style="min-height:120px;"></textarea>
+        </div>
+        <div class="card">
+          <div class="section-title" style="margin-top:0;">Test — P</div>
+          <textarea id="tplTestP" placeholder="Test message lines for P segment..." style="min-height:120px;"></textarea>
+        </div>
+        <div class="card">
+          <div class="section-title" style="margin-top:0;">Campaign — M</div>
+          <textarea id="tplCampaignM" placeholder="Campaign message lines for M segment..." style="min-height:120px;"></textarea>
+        </div>
+        <div class="card">
+          <div class="section-title" style="margin-top:0;">Campaign — P</div>
+          <textarea id="tplCampaignP" placeholder="Campaign message lines for P segment..." style="min-height:120px;"></textarea>
+        </div>
+      </div>
+      <button class="btn-primary" style="margin-top:14px;" onclick="saveTemplates()">Save all templates</button>
+    </div>
+
+    <div class="page" id="page-sender-ids">
+      <div class="page-header">
+        <div>
+          <h1>Sender IDs</h1>
+          <p>All sender IDs across accounts — pending items are auto-approved when enabled.</p>
+        </div>
+        <button class="btn-secondary" onclick="loadAdminSenderIds()">Refresh</button>
+      </div>
+      <div class="table-wrap"><table id="adminSidTable">
+        <thead><tr><th>Sender</th><th>Account</th><th>Status</th><th>Created</th></tr></thead>
+        <tbody></tbody>
+      </table></div>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="modal-balance" style="display:none;">
+  <div class="modal" style="width:400px;">
+    <h2 id="balanceModalTitle">Adjust balance</h2>
+    <p class="hint" id="balanceModalAccount" style="margin-top:0;"></p>
+    <label>Amount (EUR) — negative to remove</label>
+    <input type="number" id="balanceAmount" step="0.01" placeholder="e.g. 10 or -5">
+    <div class="flex-between" style="margin-top:16px;">
+      <button class="btn-secondary" onclick="closeModal('modal-balance')">Cancel</button>
+      <button class="btn-primary" onclick="submitBalance()">Apply</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="modal-route" style="display:none;">
+  <div class="modal" style="width:400px;">
+    <h2>Change SMS route</h2>
+    <p class="hint" id="routeModalAccount" style="margin-top:0;"></p>
+    <label>Route (vendor)</label>
+    <select id="routeSelect">
+      <option value="0">OTUS (0)</option>
+      <option value="1">OTUS_1</option>
+      <option value="2">OTUS_2</option>
+      <option value="3">OTUS_3</option>
+      <option value="4">OTUS_4</option>
+    </select>
+    <div class="flex-between" style="margin-top:16px;">
+      <button class="btn-secondary" onclick="closeModal('modal-route')">Cancel</button>
+      <button class="btn-primary" onclick="submitRoute()">Save route</button>
+    </div>
+  </div>
+</div>
+
+<div id="toastHost"></div>
+<script src="admin.js"></script>
+</body>
+</html>

@@ -25,7 +25,15 @@ const {
   readTraffic,
   getAccountBalance,
   parseStoredCookies,
-  validateSenderId
+  validateSenderId,
+  verifyAdminAccess,
+  getAdminBalance,
+  listAdminAccounts,
+  addBalanceToAccount,
+  changeAccountRoute,
+  listAdminSenderIds,
+  updateSenderIdStatus,
+  VENDOR_ROUTES
 } = require('./otusPortalClient');
 
 const SMS_RATE_EUR = 0.05;
@@ -35,6 +43,7 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 *
 
 const SESSION_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 const PUBLIC_API = new Set(['/api/auth/login', '/api/auth/status']);
+const PUBLIC_ADMIN_API = new Set(['/api/admin/auth/login', '/api/admin/auth/status']);
 
 function parseCookies(req) {
   const out = {};
@@ -54,15 +63,14 @@ function getSessionSecret() {
   return secret;
 }
 
-function signSession(username) {
-  const payload = JSON.stringify({ username, exp: Date.now() + SESSION_MAX_AGE_MS });
+function signSession(username, role) {
+  const payload = JSON.stringify({ username, role: role || 'user', exp: Date.now() + SESSION_MAX_AGE_MS });
   const body = Buffer.from(payload).toString('base64url');
   const sig = crypto.createHmac('sha256', getSessionSecret()).update(body).digest('base64url');
   return `${body}.${sig}`;
 }
 
-function verifySession(req) {
-  const token = parseCookies(req).dispatch_session;
+function verifySessionToken(token, expectedRole) {
   if (!token) return null;
   const dot = token.lastIndexOf('.');
   if (dot < 1) return null;
@@ -73,22 +81,53 @@ function verifySession(req) {
   try {
     const data = JSON.parse(Buffer.from(body, 'base64url').toString());
     if (!data.username || !data.exp || data.exp < Date.now()) return null;
+    if (expectedRole === 'admin') {
+      if (data.role !== 'admin') return null;
+    } else if (expectedRole === 'user') {
+      if (data.role && data.role !== 'user') return null;
+    }
     return data.username;
   } catch {
     return null;
   }
 }
 
+function verifySession(req) {
+  return verifySessionToken(parseCookies(req).dispatch_session, 'user');
+}
+
+function verifyAdminSession(req) {
+  return verifySessionToken(parseCookies(req).dispatch_admin_session, 'admin');
+}
+
 function setSessionCookie(res, username) {
-  res.setHeader('Set-Cookie', `dispatch_session=${signSession(username)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${Math.floor(SESSION_MAX_AGE_MS / 1000)}`);
+  res.setHeader('Set-Cookie', `dispatch_session=${signSession(username, 'user')}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${Math.floor(SESSION_MAX_AGE_MS / 1000)}`);
+}
+
+function setAdminSessionCookie(res, username) {
+  res.setHeader('Set-Cookie', `dispatch_admin_session=${signSession(username, 'admin')}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${Math.floor(SESSION_MAX_AGE_MS / 1000)}`);
 }
 
 function clearSessionCookie(res) {
   res.setHeader('Set-Cookie', 'dispatch_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0');
 }
 
+function clearAdminSessionCookie(res) {
+  res.setHeader('Set-Cookie', 'dispatch_admin_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0');
+}
+
 function requireAuth(req, res, next) {
-  if (!req.path.startsWith('/api/') || req.path === '/api/dlr' || PUBLIC_API.has(req.path)) return next();
+  if (!req.path.startsWith('/api/') || req.path === '/api/dlr') return next();
+
+  if (req.path.startsWith('/api/admin/')) {
+    if (PUBLIC_ADMIN_API.has(req.path)) return next();
+    const username = verifyAdminSession(req);
+    if (!username) return res.status(401).json({ error: 'Not authenticated' });
+    req.adminUsername = username;
+    return next();
+  }
+
+  if (PUBLIC_API.has(req.path)) return next();
   const username = verifySession(req);
   if (!username) return res.status(401).json({ error: 'Not authenticated' });
   if (!getSetting('vacotel_username') || !getSetting('vacotel_api_id')) {
@@ -101,6 +140,9 @@ function requireAuth(req, res, next) {
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(requireAuth);
+app.get('/admin', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'admin.html'));
+});
 app.use(express.static(path.join(__dirname, 'public')));
 
 // ---------- helpers ----------
@@ -139,6 +181,44 @@ async function withPortalSession(fn) {
   let result = await fn(session.cookies);
   if (result.needsRefresh) {
     session = await getPortalCookies({ forceRefresh: true });
+    if (!session.ok) return session;
+    result = await fn(session.cookies);
+  }
+  return result;
+}
+
+async function refreshAdminPortalSession() {
+  const username = getSetting('admin_username');
+  const password = getSetting('admin_password');
+  if (!username || !password) return { ok: false, error: 'Admin credentials not configured' };
+  const login = await portalLogin(username, password);
+  if (!login.ok) {
+    setSetting('otus_admin_portal_cookies', '');
+    return login;
+  }
+  const check = await verifyAdminAccess(login.cookies);
+  if (!check.ok) {
+    setSetting('otus_admin_portal_cookies', '');
+    return check;
+  }
+  setSetting('otus_admin_portal_cookies', JSON.stringify(login.cookies));
+  return { ok: true, cookies: login.cookies };
+}
+
+async function getAdminPortalCookies({ forceRefresh } = {}) {
+  if (!forceRefresh) {
+    const jar = parseStoredCookies(getSetting('otus_admin_portal_cookies'));
+    if (jar) return { ok: true, cookies: jar };
+  }
+  return refreshAdminPortalSession();
+}
+
+async function withAdminPortalSession(fn) {
+  let session = await getAdminPortalCookies();
+  if (!session.ok) return session;
+  let result = await fn(session.cookies);
+  if (result.needsRefresh) {
+    session = await getAdminPortalCookies({ forceRefresh: true });
     if (!session.ok) return session;
     result = await fn(session.cookies);
   }
@@ -184,6 +264,47 @@ function fillTemplate(tpl, lead) {
     .replace(/\{number\}/gi, lead.phone || '')
     .replace(/\{custom1\}/gi, lead.custom1 || '')
     .replace(/\{custom2\}/gi, lead.custom2 || '');
+}
+
+function getSegmentTemplates(purpose) {
+  const rows = db.prepare(`
+    SELECT segment, text FROM segment_templates
+    WHERE purpose = ? ORDER BY segment, sort_order, id
+  `).all(purpose);
+  const out = { m: [], p: [] };
+  for (const row of rows) {
+    const seg = row.segment === 'p' ? 'p' : 'm';
+    const text = String(row.text).trim();
+    if (text) out[seg].push(text);
+  }
+  return out;
+}
+
+function saveSegmentTemplates(purpose, buckets) {
+  const del = db.prepare('DELETE FROM segment_templates WHERE purpose = ?');
+  const ins = db.prepare(`
+    INSERT INTO segment_templates (segment, purpose, text, sort_order, updated_at)
+    VALUES (?, ?, ?, ?, datetime('now'))
+  `);
+  const tx = db.transaction(() => {
+    del.run(purpose);
+    for (const segment of ['m', 'p']) {
+      const lines = Array.isArray(buckets[segment]) ? buckets[segment] : [];
+      let order = 0;
+      for (const line of lines) {
+        const text = String(line).trim();
+        if (!text) continue;
+        ins.run(segment, purpose, text, order++);
+      }
+    }
+  });
+  tx();
+}
+
+function resolveSegmentMessages(purpose, segment) {
+  const seg = segment === 'p' ? 'p' : 'm';
+  const templates = getSegmentTemplates(purpose)[seg];
+  return templates.length ? templates : null;
 }
 
 function getCampaignSegments(campaignId) {
@@ -343,6 +464,180 @@ app.post('/api/auth/logout', (req, res) => {
   res.json({ ok: true });
 });
 
+// ---------- admin auth ----------
+app.get('/api/admin/auth/status', (req, res) => {
+  const username = verifyAdminSession(req);
+  res.json({
+    authenticated: !!username,
+    username: username || getSetting('admin_username') || null,
+    portal_connected: !!parseStoredCookies(getSetting('otus_admin_portal_cookies'))
+  });
+});
+
+app.post('/api/admin/auth/login', async (req, res) => {
+  const username = String(req.body.username || '').trim();
+  const password = String(req.body.password || '');
+  if (!username || !password) {
+    return res.status(400).json({ error: 'Username and password are required' });
+  }
+
+  const portal = await portalLogin(username, password);
+  if (!portal.ok) {
+    return res.status(401).json({ error: `Portal login failed: ${portal.error}` });
+  }
+  const check = await verifyAdminAccess(portal.cookies);
+  if (!check.ok) {
+    return res.status(401).json({ error: check.error || 'This account does not have admin access' });
+  }
+
+  setSetting('admin_username', username);
+  setSetting('admin_password', password);
+  setSetting('otus_admin_portal_cookies', JSON.stringify(portal.cookies));
+  setAdminSessionCookie(res, username);
+  restartSidAutoPoller();
+  res.json({ ok: true, username, portal_connected: true });
+});
+
+app.post('/api/admin/auth/logout', (req, res) => {
+  clearAdminSessionCookie(res);
+  setSetting('otus_admin_portal_cookies', '');
+  res.json({ ok: true });
+});
+
+// ---------- segment templates (user read) ----------
+app.get('/api/templates', (req, res) => {
+  const purpose = req.query.purpose === 'campaign' ? 'campaign' : 'test';
+  res.json(getSegmentTemplates(purpose));
+});
+
+// ---------- admin: balance, accounts, templates, SIDs ----------
+app.get('/api/admin/balance', async (req, res) => {
+  try {
+    const result = await withAdminPortalSession(cookies => getAdminBalance(cookies));
+    if (result.needsRefresh) return res.status(401).json({ error: result.error });
+    if (!result.ok) return res.status(502).json({ error: result.error || 'Could not fetch admin balance' });
+    res.json({ balance: result.balance, currency: result.currency, raw: result.raw });
+  } catch (e) {
+    console.error('Admin balance error:', e);
+    res.status(500).json({ error: e.message || 'Failed to fetch admin balance' });
+  }
+});
+
+app.get('/api/admin/accounts', async (req, res) => {
+  const q = String(req.query.q || '').trim().toLowerCase();
+  try {
+    const result = await withAdminPortalSession(cookies => listAdminAccounts(cookies));
+    if (result.needsRefresh) return res.status(401).json({ error: result.error });
+    if (!result.ok) return res.status(502).json({ error: result.error || 'Could not load accounts' });
+    let accounts = result.accounts || [];
+    if (q) {
+      accounts = accounts.filter(a =>
+        String(a.Name || '').toLowerCase().includes(q) ||
+        String(a.EmailAddress || '').toLowerCase().includes(q) ||
+        String(a.MobileNum || '').includes(q)
+      );
+    }
+    res.json({ accounts, recordsTotal: result.recordsTotal });
+  } catch (e) {
+    console.error('Admin accounts error:', e);
+    res.status(500).json({ error: e.message || 'Failed to load accounts' });
+  }
+});
+
+app.post('/api/admin/accounts/:id/balance', async (req, res) => {
+  const accountId = Number(req.params.id);
+  const amount = Number(req.body.amount);
+  if (!accountId || !Number.isFinite(amount) || amount === 0) {
+    return res.status(400).json({ error: 'Valid account id and non-zero amount required' });
+  }
+  try {
+    const result = await withAdminPortalSession(cookies => addBalanceToAccount(cookies, accountId, amount));
+    if (result.needsRefresh) return res.status(401).json({ error: result.error });
+    if (!result.ok) return res.status(400).json({ error: result.error || 'Balance update failed' });
+    res.json({ ok: true, message: result.message });
+  } catch (e) {
+    console.error('Admin balance transfer error:', e);
+    res.status(500).json({ error: e.message || 'Balance update failed' });
+  }
+});
+
+app.post('/api/admin/accounts/:id/route', async (req, res) => {
+  const accountId = Number(req.params.id);
+  const route = Number(req.body.route);
+  if (!accountId || !Number.isInteger(route) || route < 0 || route > 4) {
+    return res.status(400).json({ error: 'Valid account id and route 0–4 required' });
+  }
+  try {
+    const result = await withAdminPortalSession(cookies => changeAccountRoute(cookies, accountId, route));
+    if (result.needsRefresh) return res.status(401).json({ error: result.error });
+    if (!result.ok) return res.status(400).json({ error: result.error || 'Route change failed' });
+    res.json({ ok: true, route, vendor_id: VENDOR_ROUTES[route] });
+  } catch (e) {
+    console.error('Admin route change error:', e);
+    res.status(500).json({ error: e.message || 'Route change failed' });
+  }
+});
+
+app.get('/api/admin/templates', (req, res) => {
+  res.json({
+    test: getSegmentTemplates('test'),
+    campaign: getSegmentTemplates('campaign')
+  });
+});
+
+app.put('/api/admin/templates', (req, res) => {
+  const { purpose, m, p } = req.body;
+  if (purpose !== 'test' && purpose !== 'campaign') {
+    return res.status(400).json({ error: 'purpose must be test or campaign' });
+  }
+  const toLines = v => {
+    if (Array.isArray(v)) return v.map(String);
+    if (typeof v === 'string') return parseLines(v);
+    return [];
+  };
+  saveSegmentTemplates(purpose, { m: toLines(m), p: toLines(p) });
+  res.json({ ok: true, ...getSegmentTemplates(purpose) });
+});
+
+app.get('/api/admin/sender-ids', async (req, res) => {
+  try {
+    const result = await withAdminPortalSession(cookies => listAdminSenderIds(cookies));
+    if (result.needsRefresh) return res.status(401).json({ error: result.error });
+    if (!result.ok) return res.status(502).json({ error: result.error || 'Could not load sender IDs' });
+    res.json({ items: result.items });
+  } catch (e) {
+    console.error('Admin sender IDs error:', e);
+    res.status(500).json({ error: e.message || 'Failed to load sender IDs' });
+  }
+});
+
+app.get('/api/admin/sid-auto', (req, res) => {
+  let lastRun = null;
+  try {
+    lastRun = JSON.parse(getSetting('sid_auto_last_run') || 'null');
+  } catch (_) {}
+  res.json({
+    enabled: getSetting('sid_auto_approve') === '1',
+    interval_ms: parseInt(getSetting('sid_auto_interval_ms')) || 180000,
+    last_run: lastRun
+  });
+});
+
+app.put('/api/admin/sid-auto', (req, res) => {
+  const { enabled, interval_ms } = req.body;
+  if (enabled !== undefined) setSetting('sid_auto_approve', enabled ? '1' : '0');
+  if (interval_ms !== undefined) {
+    const ms = Math.max(60000, parseInt(interval_ms) || 180000);
+    setSetting('sid_auto_interval_ms', String(ms));
+  }
+  restartSidAutoPoller();
+  res.json({
+    ok: true,
+    enabled: getSetting('sid_auto_approve') === '1',
+    interval_ms: parseInt(getSetting('sid_auto_interval_ms')) || 180000
+  });
+});
+
 // ---------- settings ----------
 app.get('/api/settings', (req, res) => {
   res.json({
@@ -477,31 +772,19 @@ app.get('/api/balance', async (req, res) => {
 });
 
 // ---------- quick send (numbers × messages, single SID) ----------
-function resolveQuickSendMessages(body, file) {
-  if (file) {
-    const text = file.buffer.toString('utf8');
-    if (file.originalname.toLowerCase().endsWith('.csv')) {
-      const records = parse(text, { columns: false, skip_empty_lines: true, trim: true });
-      return records.map(r => String(r[0]).trim()).filter(Boolean);
-    }
-    return parseLines(text);
-  }
-  if (Array.isArray(body.messages) && body.messages.length) {
-    return body.messages.map(m => String(m).trim()).filter(Boolean);
-  }
-  if (body.message) {
-    return parseLines(body.message);
-  }
-  return [];
+function resolveQuickSendMessages(body) {
+  const segment = body.segment === 'p' ? 'p' : 'm';
+  return resolveSegmentMessages('test', segment) || [];
 }
 
-app.post('/api/quick-send/preview', upload.single('message_file'), (req, res) => {
+app.post('/api/quick-send/preview', upload.none(), (req, res) => {
   const source = String(req.body.source || '').trim();
   const phones = parsePhones(req.body.numbers || '');
-  const messages = resolveQuickSendMessages(req.body, req.file);
+  const segment = req.body.segment === 'p' ? 'p' : 'm';
+  const messages = resolveQuickSendMessages(req.body);
   if (!source) return res.status(400).json({ error: 'Sender ID (SID) required' });
   if (!phones.length) return res.status(400).json({ error: 'At least one valid phone number required' });
-  if (!messages.length) return res.status(400).json({ error: 'At least one message required (text box or file)' });
+  if (!messages.length) return res.status(400).json({ error: `No test messages configured for segment ${segment.toUpperCase()} — ask admin to add templates` });
 
   const queue = buildCartesianQueue(phones, messages);
   const rate = SMS_RATE_EUR;
@@ -514,6 +797,7 @@ app.post('/api/quick-send/preview', upload.single('message_file'), (req, res) =>
   res.json({
     phone_count: phones.length,
     message_count: messages.length,
+    segment,
     total_sms: queue.length,
     estimated_cost: estCost,
     rate_per_sms: rate,
@@ -521,16 +805,17 @@ app.post('/api/quick-send/preview', upload.single('message_file'), (req, res) =>
   });
 });
 
-app.post('/api/quick-send', upload.single('message_file'), async (req, res) => {
+app.post('/api/quick-send', upload.none(), async (req, res) => {
   const source = String(req.body.source || '').trim();
   const phones = parsePhones(req.body.numbers || '');
-  const messages = resolveQuickSendMessages(req.body, req.file);
+  const messages = resolveQuickSendMessages(req.body);
   const rate = SMS_RATE_EUR;
   const throttleMs = parseInt(req.body.throttle_ms) || 300;
+  const segment = req.body.segment === 'p' ? 'p' : 'm';
 
   if (!source) return res.status(400).json({ error: 'Sender ID (SID) required' });
   if (!phones.length) return res.status(400).json({ error: 'At least one valid phone number required' });
-  if (!messages.length) return res.status(400).json({ error: 'At least one message required' });
+  if (!messages.length) return res.status(400).json({ error: `No test messages configured for segment ${segment.toUpperCase()}` });
 
   const queue = buildCartesianQueue(phones, messages);
   const estCost = estimateCost(queue, rate, null);
@@ -784,7 +1069,6 @@ app.post('/api/campaigns', (req, res) => {
 
 // Launch campaign: inline uploads for messages + per-client lead lists/SIDs
 app.post('/api/campaigns/launch', upload.fields([
-  { name: 'message_file', maxCount: 1 },
   { name: 'segment_files', maxCount: 20 }
 ]), (req, res) => {
   try {
@@ -795,26 +1079,18 @@ app.post('/api/campaigns/launch', upload.fields([
     return res.status(400).json({ error: 'Invalid payload JSON' });
   }
 
-  const { name, rotation_mode, rate_per_sms, throttle_ms, roster_id, segments } = payload;
+  const { name, rotation_mode, rate_per_sms, throttle_ms, roster_id, segments, segment } = payload;
   if (!name) return res.status(400).json({ error: 'Campaign name required' });
   if (!Array.isArray(segments) || !segments.length) return res.status(400).json({ error: 'At least one client segment required' });
 
   let resolvedRosterId = roster_id;
-  const messages = payload.messages || [];
   if (!resolvedRosterId) {
-    const msgFile = req.files?.message_file?.[0];
-    let msgList = messages.map(m => String(m).trim()).filter(Boolean);
-    if (msgFile) {
-      const text = msgFile.buffer.toString('utf8');
-      if (msgFile.originalname.toLowerCase().endsWith('.csv')) {
-        const records = parse(text, { columns: false, skip_empty_lines: true, trim: true });
-        msgList = records.map(r => String(r[0]).trim()).filter(Boolean);
-      } else {
-        msgList = parseLines(text);
-      }
+    const seg = segment === 'p' ? 'p' : 'm';
+    const msgList = resolveSegmentMessages('campaign', seg);
+    if (!msgList || !msgList.length) {
+      return res.status(400).json({ error: `No campaign messages configured for segment ${seg.toUpperCase()} — ask admin to add templates` });
     }
-    if (!msgList.length) return res.status(400).json({ error: 'Upload or paste at least one message' });
-    const { rosterId } = createRosterFromMessages(`${name} messages`, msgList);
+    const { rosterId } = createRosterFromMessages(`${name} — ${seg.toUpperCase()}`, msgList);
     resolvedRosterId = rosterId;
   }
 
@@ -1100,6 +1376,49 @@ app.get('/api/campaigns/:id/export.csv', (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 
+// ---------- background SID auto-approve ----------
+let sidAutoTimer = null;
+
+async function runSidAutoApprove() {
+  if (getSetting('sid_auto_approve') !== '1') return;
+  if (!getSetting('admin_username') || !getSetting('admin_password')) return;
+
+  const log = { at: new Date().toISOString(), approved: 0, errors: [] };
+  try {
+    const result = await withAdminPortalSession(async (cookies) => {
+      const list = await listAdminSenderIds(cookies);
+      if (!list.ok) return list;
+      const pending = (list.items || []).filter(s => Number(s.Active) === 2);
+      if (!pending.length) return { ok: true, approved: 0 };
+      const ids = pending.map(s => s.AllowedSenderId);
+      const out = await updateSenderIdStatus(cookies, ids, 1);
+      if (!out.ok) return out;
+      return { ok: true, approved: ids.length, ids };
+    });
+    if (result.needsRefresh) {
+      log.errors.push(result.error || 'Session expired');
+    } else if (!result.ok) {
+      log.errors.push(result.error || 'Auto-approve failed');
+    } else {
+      log.approved = result.approved || 0;
+      if (result.ids) log.ids = result.ids;
+    }
+  } catch (e) {
+    log.errors.push(e.message || String(e));
+  }
+  setSetting('sid_auto_last_run', JSON.stringify(log));
+}
+
+function restartSidAutoPoller() {
+  if (sidAutoTimer) clearInterval(sidAutoTimer);
+  sidAutoTimer = null;
+  if (getSetting('sid_auto_approve') !== '1') return;
+  if (!getSetting('admin_username') || !getSetting('admin_password')) return;
+  const ms = Math.max(60000, parseInt(getSetting('sid_auto_interval_ms')) || 180000);
+  sidAutoTimer = setInterval(() => runSidAutoApprove(), ms);
+  runSidAutoApprove();
+}
+
 // Recover campaigns stuck in 'sending' with no recorded sends (e.g. after a crash)
 db.prepare(`
   UPDATE campaigns SET status = 'draft', started_at = NULL
@@ -1107,4 +1426,8 @@ db.prepare(`
     AND id NOT IN (SELECT DISTINCT campaign_id FROM sends WHERE campaign_id IS NOT NULL)
 `).run();
 
-app.listen(PORT, () => console.log(`Dispatch SMS Console running at http://localhost:${PORT}`));
+app.listen(PORT, () => {
+  console.log(`Dispatch SMS Console running at http://localhost:${PORT}`);
+  console.log(`Admin console at http://localhost:${PORT}/admin`);
+  restartSidAutoPoller();
+});

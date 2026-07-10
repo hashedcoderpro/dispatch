@@ -14,6 +14,34 @@ function showPage(name) {
 function openModal(id) { document.getElementById(id).style.display = 'flex'; }
 function closeModal(id) { document.getElementById(id).style.display = 'none'; }
 
+let confirmSendResolver = null;
+
+function closeConfirmSend(confirmed) {
+  document.getElementById('modal-confirm-send').style.display = 'none';
+  if (confirmSendResolver) {
+    const resolve = confirmSendResolver;
+    confirmSendResolver = null;
+    resolve(!!confirmed);
+  }
+}
+
+async function confirmSendModal({ title, testMode, stats, confirmLabel, showMode = true }) {
+  document.getElementById('confirmSendTitle').textContent = title || 'Confirm send';
+  const modeCls = testMode ? 'mode-test' : 'mode-live';
+  const modeLabel = testMode ? 'TEST MODE' : 'LIVE MODE';
+  const modeBlock = showMode
+    ? `<span class="confirm-mode ${modeCls}">${modeLabel}</span>`
+    : '';
+  const lines = [
+    modeBlock,
+    stats.map(s => `<div class="confirm-stat"><span class="muted">${s.label}</span><strong>${s.value}</strong></div>`).join('')
+  ].join('');
+  document.getElementById('confirmSendBody').innerHTML = lines;
+  document.getElementById('confirmSendBtn').textContent = confirmLabel || (testMode ? 'Send (test)' : 'Send now');
+  document.getElementById('modal-confirm-send').style.display = 'flex';
+  return new Promise(resolve => { confirmSendResolver = resolve; });
+}
+
 function toast(msg, isError) {
   const host = document.getElementById('toastHost');
   const el = document.createElement('div');
@@ -120,6 +148,8 @@ function fmtDate(s) { if (!s) return '—'; return new Date(s.replace(' ', 'T') 
 let balancePollTimer = null;
 const SMS_RATE_EUR = 0.05;
 let availableSids = [];
+let testTemplates = { m: [], p: [] };
+let campaignTemplates = { m: [], p: [] };
 
 function startBalancePolling() {
   if (balancePollTimer) clearInterval(balancePollTimer);
@@ -206,9 +236,38 @@ async function loadDashboard() {
 }
 
 // ---------- SEND SMS (quick) ----------
-let qsMessageFileLines = 0;
 let defaultRatePerSms = SMS_RATE_EUR;
 let appTestMode = true;
+
+async function loadTestTemplates() {
+  try {
+    testTemplates = await api('/api/templates?purpose=test');
+    const seg = document.getElementById('qsSegment')?.value || 'm';
+    const count = (testTemplates[seg] || []).length;
+    const hint = document.getElementById('qsTemplateHint');
+    if (hint) hint.textContent = count
+      ? `${count} message variant${count !== 1 ? 's' : ''} loaded for ${seg.toUpperCase()}`
+      : `No test templates for ${seg.toUpperCase()} — ask admin to configure`;
+    return testTemplates;
+  } catch (e) {
+    return testTemplates;
+  }
+}
+
+async function loadCampaignTemplates() {
+  try {
+    campaignTemplates = await api('/api/templates?purpose=campaign');
+    const seg = document.getElementById('launchSegment')?.value || 'm';
+    const count = (campaignTemplates[seg] || []).length;
+    const hint = document.getElementById('launchTemplateHint');
+    if (hint) hint.textContent = count
+      ? `${count} campaign variant${count !== 1 ? 's' : ''} for ${seg.toUpperCase()}`
+      : `No campaign templates for ${seg.toUpperCase()} — ask admin to configure`;
+    return campaignTemplates;
+  } catch (e) {
+    return campaignTemplates;
+  }
+}
 
 function updateTestModeUI(testMode) {
   appTestMode = !!testMode;
@@ -236,12 +295,17 @@ function countLines(text) {
 
 function updateQuickSendCount() {
   const nums = countLines(document.getElementById('qsNumbers').value);
-  const msgText = document.getElementById('qsMessage').value.trim();
-  const msgs = msgText ? countLines(document.getElementById('qsMessage').value) : qsMessageFileLines;
-  const msgCount = msgs || (msgText ? 1 : qsMessageFileLines);
+  const seg = document.getElementById('qsSegment').value;
+  const msgCount = (testTemplates[seg] || []).length;
+  const hint = document.getElementById('qsTemplateHint');
+  if (hint) hint.textContent = msgCount
+    ? `${msgCount} message variant${msgCount !== 1 ? 's' : ''} for ${seg.toUpperCase()}`
+    : `No test templates for ${seg.toUpperCase()} — ask admin to configure`;
   document.getElementById('qsCountTag').textContent = `${nums} number${nums !== 1 ? 's' : ''} × ${msgCount || 0} message${msgCount !== 1 ? 's' : ''} = ${nums * (msgCount || 0)} SMS`;
   if (defaultRatePerSms && nums && msgCount) {
     document.getElementById('qsCostHint').textContent = `~${fmtEur(nums * msgCount * defaultRatePerSms)} est. (1 seg/msg)`;
+  } else {
+    document.getElementById('qsCostHint').textContent = '';
   }
 }
 
@@ -256,44 +320,6 @@ function clearFileInput(input, label, defaultLabel, wrapId, onClear) {
   if (label) label.textContent = defaultLabel;
   setFileDropState(wrapId, false);
   if (onClear) onClear();
-}
-
-function clearQsMessageFile() {
-  clearFileInput(
-    document.getElementById('qsMessageFile'),
-    document.getElementById('qsMessageFileLabel'),
-    'Or upload .txt / .csv — one message per line',
-    'qsMessageFileWrap',
-    () => { qsMessageFileLines = 0; updateQuickSendCount(); }
-  );
-}
-
-function onQsMessageFile(input) {
-  const file = input.files[0];
-  document.getElementById('qsMessageFileLabel').textContent = file?.name || 'Or upload .txt / .csv — one message per line';
-  setFileDropState('qsMessageFileWrap', !!file);
-  if (!file) { qsMessageFileLines = 0; updateQuickSendCount(); return; }
-  file.text().then(text => {
-    qsMessageFileLines = countLines(text);
-    updateQuickSendCount();
-  });
-}
-
-function clearLaunchMessageFile() {
-  clearFileInput(
-    document.getElementById('launchMessageFile'),
-    document.getElementById('launchMessageFileLabel'),
-    'Upload message file (.txt/.csv)',
-    'launchMessageFileWrap',
-    () => updateLaunchCount()
-  );
-}
-
-function onLaunchMessageFile(input) {
-  const file = input.files[0];
-  document.getElementById('launchMessageFileLabel').textContent = file?.name || 'Upload message file (.txt/.csv)';
-  setFileDropState('launchMessageFileWrap', !!file);
-  updateLaunchCount();
 }
 
 function onLaunchLeadsFile(input) {
@@ -316,11 +342,15 @@ function clearLaunchLeadsFile() {
 function updateLaunchCount() {
   const phones = countLines(document.getElementById('launchPhones').value);
   const hasLeadsFile = document.getElementById('launchLeadsFile').files[0];
-  const msgs = countLines(document.getElementById('launchMessages').value);
-  const hasMsgFile = document.getElementById('launchMessageFile').files[0];
+  const seg = document.getElementById('launchSegment').value;
+  const msgCount = (campaignTemplates[seg] || []).length;
   const leadLabel = phones ? `${phones} lead${phones !== 1 ? 's' : ''}` : (hasLeadsFile ? 'leads from file' : '0 leads');
-  const msgLabel = msgs ? `${msgs} message${msgs !== 1 ? 's' : ''}` : (hasMsgFile ? 'messages from file' : '0 messages');
+  const msgLabel = msgCount ? `${msgCount} variant${msgCount !== 1 ? 's' : ''} (${seg.toUpperCase()})` : `0 variants (${seg.toUpperCase()})`;
   document.getElementById('launchCountTag').textContent = `${leadLabel} · ${msgLabel}`;
+  const hint = document.getElementById('launchTemplateHint');
+  if (hint) hint.textContent = msgCount
+    ? `${msgCount} campaign variant${msgCount !== 1 ? 's' : ''} for ${seg.toUpperCase()}`
+    : `No campaign templates for ${seg.toUpperCase()} — ask admin to configure`;
 }
 
 async function launchCampaign() {
@@ -334,33 +364,32 @@ async function launchCampaign() {
   const leadsFile = document.getElementById('launchLeadsFile').files[0];
   if (!phones && !leadsFile) return toast('Add leads (paste numbers or upload a file)', true);
 
-  const messages = document.getElementById('launchMessages').value.split('\n').map(m => m.trim()).filter(Boolean);
-  const msgFile = document.getElementById('launchMessageFile').files[0];
-  if (!messages.length && !msgFile) return toast('Add messages (paste or upload a file)', true);
+  const segment = document.getElementById('launchSegment').value;
+  await loadCampaignTemplates();
+  if (!(campaignTemplates[segment] || []).length) {
+    return toast(`No campaign templates for segment ${segment.toUpperCase()}`, true);
+  }
 
   const fd = new FormData();
   if (leadsFile) fd.append('segment_files', leadsFile);
 
   const payload = {
     name,
+    segment,
     rotation_mode: document.getElementById('launchRotation').value,
     rate_per_sms: SMS_RATE_EUR,
     throttle_ms: parseInt(document.getElementById('launchThrottle').value) || 300,
     roster_id: null,
-    messages,
     segments: [{ source, phones }]
   };
   fd.append('payload', JSON.stringify(payload));
-  if (msgFile) fd.append('message_file', msgFile);
 
   try {
     const res = await api('/api/campaigns/launch', { method: 'POST', body: fd });
     toast('Campaign created — preview and send below');
     document.getElementById('launchName').value = '';
     document.getElementById('launchPhones').value = '';
-    document.getElementById('launchMessages').value = '';
     clearLaunchLeadsFile();
-    clearLaunchMessageFile();
     updateLaunchCount();
     loadCampaigns();
     openCampaignDetail(res.campaign_id);
@@ -372,6 +401,7 @@ async function loadSendPage() {
     const s = await refreshTestModeUI() || await api('/api/settings');
     defaultRatePerSms = s.default_rate_per_sms || SMS_RATE_EUR;
     await loadSenderIdOptions();
+    await loadTestTemplates();
     updateQuickSendCount();
   } catch (e) {}
 }
@@ -380,10 +410,7 @@ function buildQuickSendFormData() {
   const fd = new FormData();
   fd.append('numbers', document.getElementById('qsNumbers').value);
   fd.append('source', document.getElementById('qsSource').value);
-  const msg = document.getElementById('qsMessage').value.trim();
-  if (msg) fd.append('message', msg);
-  const file = document.getElementById('qsMessageFile').files[0];
-  if (file) fd.append('message_file', file);
+  fd.append('segment', document.getElementById('qsSegment').value);
   return fd;
 }
 
@@ -400,10 +427,35 @@ async function previewQuickSend() {
 
 async function sendQuickSms() {
   const s = await refreshTestModeUI();
-  const modeNote = s?.test_mode
-    ? 'TEST MODE — this will NOT send to Otus (simulation only).'
-    : 'LIVE MODE — this will send real SMS via Otus and may incur charges.';
-  if (!confirm(`Send now?\n\n${modeNote}`)) return;
+  const seg = document.getElementById('qsSegment').value;
+  await loadTestTemplates();
+  if (!(testTemplates[seg] || []).length) {
+    return toast(`No test templates for segment ${seg.toUpperCase()}`, true);
+  }
+
+  let preview;
+  try {
+    preview = await api('/api/quick-send/preview', { method: 'POST', body: buildQuickSendFormData() });
+  } catch (e) { return toast(e.message, true); }
+
+  let balance = null;
+  try {
+    const bal = await api('/api/balance');
+    balance = bal.balance;
+  } catch (e) {}
+
+  const confirmed = await confirmSendModal({
+    title: 'Send test SMS?',
+    testMode: !!s?.test_mode,
+    stats: [
+      { label: 'Segment', value: seg.toUpperCase() },
+      { label: 'Total SMS', value: String(preview.total_sms) },
+      { label: 'Estimated cost', value: fmtMoney(preview.estimated_cost) },
+      { label: 'Account balance', value: balance != null ? fmtEur(balance) : '—' }
+    ]
+  });
+  if (!confirmed) return;
+
   try {
     const res = await api('/api/quick-send', { method: 'POST', body: buildQuickSendFormData() });
     toast(`Sending ${res.total_sms} SMS — check Traffic Report for delivery status`);
@@ -453,7 +505,16 @@ async function deleteSenderId(btn) {
   const otusId = Number(btn.dataset.otusId);
   const source = btn.dataset.source || '';
   if (!otusId) return;
-  if (!confirm(`Delete sender ID "${source}" from your Otus account?\n\nThis cannot be undone.`)) return;
+  const confirmed = await confirmSendModal({
+    title: 'Delete sender ID?',
+    showMode: false,
+    confirmLabel: 'Delete',
+    stats: [
+      { label: 'Sender ID', value: source },
+      { label: 'Warning', value: 'Cannot be undone' }
+    ]
+  });
+  if (!confirmed) return;
   try {
     await api('/api/sender-ids/delete', {
       method: 'POST',
@@ -470,6 +531,7 @@ let currentCampaignId = null;
 
 async function loadCampaigns() {
   await loadSenderIdOptions();
+  await loadCampaignTemplates();
   updateLaunchCount();
 
   const campaigns = await api('/api/campaigns');
@@ -537,10 +599,29 @@ async function openCampaignDetail(id) {
 
 async function sendCampaign() {
   const s = await refreshTestModeUI();
-  const modeNote = s?.test_mode
-    ? 'TEST MODE — will NOT reach Otus.'
-    : 'LIVE MODE — real SMS will be sent via Otus.';
-  if (!confirm(`Send this campaign now?\n\n${modeNote}`)) return;
+  let preview;
+  try {
+    preview = await api(`/api/campaigns/${currentCampaignId}/preview`);
+  } catch (e) { return toast(e.message, true); }
+
+  let balance = null;
+  try {
+    const bal = await api('/api/balance');
+    balance = bal.balance;
+  } catch (e) {}
+
+  const confirmed = await confirmSendModal({
+    title: 'Send campaign?',
+    testMode: !!s?.test_mode,
+    stats: [
+      { label: 'Leads', value: String(preview.total_leads) },
+      { label: 'Message variants', value: String(preview.template_count) },
+      { label: 'Estimated cost', value: fmtMoney(preview.estimated_cost) },
+      { label: 'Account balance', value: balance != null ? fmtEur(balance) : '—' }
+    ]
+  });
+  if (!confirmed) return;
+
   try {
     const res = await api(`/api/campaigns/${currentCampaignId}/send`, { method: 'POST' });
     toast(`Sending to ${res.lead_count} leads — check Traffic Report for delivery status`);

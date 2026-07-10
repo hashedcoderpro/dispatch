@@ -108,6 +108,16 @@ CREATE TABLE IF NOT EXISTS sender_id_requests (
   created_at TEXT DEFAULT (datetime('now')),
   updated_at TEXT
 );
+
+CREATE TABLE IF NOT EXISTS segment_templates (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  segment TEXT NOT NULL,
+  purpose TEXT NOT NULL,
+  text TEXT NOT NULL,
+  sort_order INTEGER DEFAULT 0,
+  updated_at TEXT DEFAULT (datetime('now')),
+  UNIQUE(segment, purpose, sort_order)
+);
 `);
 
 // seed default settings if missing
@@ -117,6 +127,11 @@ const defaults = {
   vacotel_password: '',
   vacotel_api_id: '',
   otus_portal_cookies: '',
+  admin_username: '',
+  admin_password: '',
+  otus_admin_portal_cookies: '',
+  sid_auto_approve: '1',
+  sid_auto_interval_ms: '180000',
   test_mode: '1',
   default_rate_per_sms: '0.05'
 };
