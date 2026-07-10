@@ -136,13 +136,39 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 .field-row > div { flex: 1; }
 .hint { font-size: 11px; color: var(--text-faint); margin-top: -10px; margin-bottom: 14px; }
 
+.file-drop-wrap {
+  position: relative;
+  margin-bottom: 14px;
+}
 .file-drop {
   border: 1.5px dashed var(--border); border-radius: var(--radius); padding: 22px;
-  text-align: center; color: var(--text-dim); font-size: 13px; margin-bottom: 14px; cursor: pointer;
+  text-align: center; color: var(--text-dim); font-size: 13px; cursor: pointer;
   transition: border-color 0.15s;
 }
+.file-drop-wrap .file-drop { margin-bottom: 0; }
 .file-drop:hover { border-color: var(--accent); }
 .file-drop input { display: none; }
+.file-drop-close {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 26px;
+  height: 26px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--panel-raised);
+  color: var(--text-dim);
+  font-size: 16px;
+  line-height: 1;
+  padding: 0;
+  cursor: pointer;
+  display: none;
+}
+.file-drop-close:hover {
+  color: var(--text);
+  border-color: var(--text-dim);
+}
+.file-drop-wrap.has-file .file-drop-close { display: block; }
 
 button, .btn {
   font-family: inherit; font-size: 13px; font-weight: 600; border-radius: 6px; border: 1px solid transparent;

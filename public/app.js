@@ -180,14 +180,53 @@ function updateQuickSendCount() {
   }
 }
 
+function setFileDropState(wrapId, hasFile) {
+  const wrap = document.getElementById(wrapId);
+  if (wrap) wrap.classList.toggle('has-file', !!hasFile);
+}
+
+function clearFileInput(input, label, defaultLabel, wrapId, onClear) {
+  if (!input) return;
+  input.value = '';
+  if (label) label.textContent = defaultLabel;
+  setFileDropState(wrapId, false);
+  if (onClear) onClear();
+}
+
+function clearQsMessageFile() {
+  clearFileInput(
+    document.getElementById('qsMessageFile'),
+    document.getElementById('qsMessageFileLabel'),
+    'Or upload .txt / .csv — one message per line',
+    'qsMessageFileWrap',
+    () => { qsMessageFileLines = 0; updateQuickSendCount(); }
+  );
+}
+
 function onQsMessageFile(input) {
   const file = input.files[0];
   document.getElementById('qsMessageFileLabel').textContent = file?.name || 'Or upload .txt / .csv — one message per line';
+  setFileDropState('qsMessageFileWrap', !!file);
   if (!file) { qsMessageFileLines = 0; updateQuickSendCount(); return; }
   file.text().then(text => {
     qsMessageFileLines = countLines(text);
     updateQuickSendCount();
   });
+}
+
+function clearLaunchMessageFile() {
+  clearFileInput(
+    document.getElementById('launchMessageFile'),
+    document.getElementById('launchMessageFileLabel'),
+    'Upload message file (.txt/.csv)',
+    'launchMessageFileWrap'
+  );
+}
+
+function onLaunchMessageFile(input) {
+  const file = input.files[0];
+  document.getElementById('launchMessageFileLabel').textContent = file?.name || 'Upload message file (.txt/.csv)';
+  setFileDropState('launchMessageFileWrap', !!file);
 }
 
 async function loadSendPage() {
@@ -254,12 +293,34 @@ function addLaunchSegment(data) {
     </div>
     <label>Numbers (one per line) or upload .txt / .csv</label>
     <textarea class="seg-phones" placeholder="34612345678&#10;34698765432" oninput="updateLaunchCount()">${data?.phones || ''}</textarea>
-    <div class="file-drop" onclick="this.querySelector('input').click()">
-      <div class="seg-file-label">Upload .txt or .csv for this client</div>
-      <input type="file" class="seg-file" accept=".csv,.txt" onchange="this.closest('.file-drop').querySelector('.seg-file-label').textContent=this.files[0]?.name||'Upload .txt or .csv'; updateLaunchCount()">
+    <div class="file-drop-wrap seg-file-wrap">
+      <div class="file-drop" onclick="this.querySelector('input').click()">
+        <div class="seg-file-label">Upload .txt or .csv for this client</div>
+        <input type="file" class="seg-file" accept=".csv,.txt" onchange="onSegmentFile(this)">
+      </div>
+      <button type="button" class="file-drop-close" title="Remove file" onclick="event.stopPropagation(); clearSegmentFile(this)">×</button>
     </div>
   `;
   host.appendChild(div);
+  updateLaunchCount();
+}
+
+function onSegmentFile(input) {
+  const file = input.files[0];
+  const wrap = input.closest('.seg-file-wrap');
+  const label = wrap?.querySelector('.seg-file-label');
+  if (label) label.textContent = file?.name || 'Upload .txt or .csv for this client';
+  if (wrap) wrap.classList.toggle('has-file', !!file);
+  updateLaunchCount();
+}
+
+function clearSegmentFile(btn) {
+  const wrap = btn.closest('.seg-file-wrap');
+  const input = wrap?.querySelector('.seg-file');
+  const label = wrap?.querySelector('.seg-file-label');
+  if (input) input.value = '';
+  if (label) label.textContent = 'Upload .txt or .csv for this client';
+  if (wrap) wrap.classList.remove('has-file');
   updateLaunchCount();
 }
 
@@ -326,6 +387,7 @@ async function launchCampaign() {
     toast(`Campaign created (${res.segments} client${res.segments > 1 ? 's' : ''}) — open it below to preview & send`);
     document.getElementById('launchName').value = '';
     document.getElementById('launchMessages').value = '';
+    clearLaunchMessageFile();
     loadCampaigns();
     openCampaignDetail(res.campaign_id);
   } catch (e) { toast(e.message, true); }
