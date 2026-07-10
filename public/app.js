@@ -353,6 +353,26 @@ function updateLaunchCount() {
     : `No campaign templates for ${seg.toUpperCase()} — ask admin to configure`;
 }
 
+function getLaunchRotationMode() {
+  const v = Number(document.getElementById('launchDeliveryMode').value);
+  return v === 1 ? 'random' : 'sequential';
+}
+
+function getLaunchThrottleMs() {
+  const perSec = Math.min(15, Math.max(5, parseInt(document.getElementById('launchSmsPerSec').value, 10) || 10));
+  return Math.round(1000 / perSec);
+}
+
+function updateLaunchDeliveryLabel() {
+  const v = Number(document.getElementById('launchDeliveryMode').value);
+  document.getElementById('launchDeliveryValue').textContent = v === 1 ? 'Mix 2' : 'Mix';
+}
+
+function updateLaunchRateLabel() {
+  const perSec = document.getElementById('launchSmsPerSec').value;
+  document.getElementById('launchRateValue').textContent = `${perSec} / sec`;
+}
+
 async function launchCampaign() {
   const name = document.getElementById('launchName').value.trim();
   if (!name) return toast('Campaign name required', true);
@@ -376,9 +396,9 @@ async function launchCampaign() {
   const payload = {
     name,
     segment,
-    rotation_mode: document.getElementById('launchRotation').value,
+    rotation_mode: getLaunchRotationMode(),
     rate_per_sms: SMS_RATE_EUR,
-    throttle_ms: parseInt(document.getElementById('launchThrottle').value) || 300,
+    throttle_ms: getLaunchThrottleMs(),
     roster_id: null,
     segments: [{ source, phones }]
   };
