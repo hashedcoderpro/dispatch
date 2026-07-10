@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Dispatch — SMS Campaign Manager</title>
+<title>Dispatch SMS Console</title>
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -14,14 +14,14 @@
       <span class="bars"><span></span><span></span><span></span><span></span></span>
       Dispatch
     </div>
-    <p class="login-sub">Vacotel SMS Console</p>
-    <p class="hint" style="margin-top:0;">Sign in with your Otus/Vacotel portal credentials. All three are required — the API token is used for sending SMS; username and password establish your portal session for sender ID requests.</p>
+    <p class="login-sub">Dispatch SMS Console</p>
+    <p class="hint" style="margin-top:0;">Sign in with your Otus portal credentials. All three are required — the API token is used for sending SMS; username and password establish your portal session for sender ID management.</p>
     <label>Username</label>
     <input type="text" id="loginUsername" placeholder="e.g. ClientOtus" autocomplete="username">
     <label>Portal password</label>
     <input type="password" id="loginPassword" placeholder="Your otusprivategw.com password" autocomplete="current-password">
     <label>API token</label>
-    <input type="password" id="loginApiToken" placeholder="From Vacotel → API integration" autocomplete="off">
+    <input type="password" id="loginApiToken" placeholder="From Otus → API integration" autocomplete="off">
     <p id="loginError" class="login-error" style="display:none;"></p>
     <button class="btn-primary login-btn" id="loginBtn" onclick="doLogin()">Sign in</button>
   </div>
@@ -34,7 +34,7 @@
         <span class="bars"><span></span><span></span><span></span><span></span></span>
         Dispatch
       </div>
-      <div class="brand-sub">Vacotel SMS Console</div>
+      <div class="brand-sub">Dispatch SMS Console</div>
     </div>
     <div class="nav">
       <button class="nav-item active" data-page="dashboard"><span class="dot"></span>Dashboard</button>
@@ -51,7 +51,7 @@
       <div class="balance-pill">
         <div>
           <div class="label">Balance</div>
-          <div class="amount" id="sidebarBalance">$0.00</div>
+          <div class="amount" id="sidebarBalance">€0.00</div>
         </div>
       </div>
     </div>
@@ -59,7 +59,7 @@
 
   <div class="main">
     <div id="testModeBanner" class="test-mode-banner" style="display:none;">
-      <strong>Test mode is on</strong> — SMS are simulated locally and never sent to Vacotel. Uncheck Test mode in Settings, click Save, then send again.
+      <strong>Test mode is on</strong> — SMS are simulated locally and never sent to Otus. Uncheck Test mode in Settings, click Save, then send again.
     </div>
 
     <!-- DASHBOARD -->
@@ -89,7 +89,7 @@
           <label>Send to (one number per line)</label>
           <textarea id="qsNumbers" placeholder="15551234567&#10;15559876543" oninput="updateQuickSendCount()"></textarea>
           <label>Sender ID (SID)</label>
-          <input type="text" id="qsSource" placeholder="e.g. YourBrand">
+          <select id="qsSource"><option value="">— loading sender IDs —</option></select>
         </div>
         <div class="card">
           <div class="section-title" style="margin-top:0;">Content</div>
@@ -129,14 +129,14 @@
       </div>
       <div class="card" style="max-width:480px; margin-bottom:20px;">
         <div class="section-title" style="margin-top:0;">Request new sender ID</div>
-        <p class="hint" style="margin-top:0;">Alphanumeric, max 15 characters. Vacotel must approve before you can send with it.</p>
+        <p class="hint" style="margin-top:0;">Alphanumeric, max 15 characters. Otus must approve before you can send with it.</p>
         <label>Sender ID</label>
         <input type="text" id="sidRequestInput" placeholder="e.g. YourBrand" maxlength="15">
         <button class="btn-primary" style="margin-top:10px;" onclick="requestSenderId()">Submit request</button>
       </div>
       <div class="section-title">On your Otus account</div>
       <div class="table-wrap"><table id="otusSidTable">
-        <thead><tr><th>Sender ID</th><th>Status</th><th>Otus ID</th></tr></thead>
+        <thead><tr><th>Sender ID</th><th>Status</th><th>Otus ID</th><th></th></tr></thead>
         <tbody></tbody>
       </table></div>
       <div class="section-title" style="margin-top:20px;">Requests via Dispatch</div>
@@ -183,9 +183,9 @@
             </select>
           </div>
           <div>
-            <label>Cost per SMS segment ($)</label>
-            <input type="number" id="launchRate" step="0.001" placeholder="from settings">
-            <p class="hint" style="margin-top:-8px;">Deducted from your balance per segment sent. Leave blank to use Settings default. A 161-char GSM message = 2 segments.</p>
+            <label>Cost per SMS segment</label>
+            <input type="text" id="launchRate" readonly value="€0.05">
+            <p class="hint" style="margin-top:-8px;">Fixed at €0.05 per segment. A 161-char GSM message = 2 segments.</p>
           </div>
           <div>
             <label>Throttle — delay between sends (ms)</label>
@@ -247,7 +247,7 @@
 
     <!-- SETTINGS -->
     <div class="page" id="page-settings">
-      <div class="page-header"><div><h1>Settings</h1><p>Test mode, billing, and webhooks.</p></div></div>
+      <div class="page-header"><div><h1>Settings</h1><p>Test mode and webhooks.</p></div></div>
 
       <div class="card" style="max-width:480px;">
         <div class="section-title" style="margin-top:0;">Account</div>
@@ -260,32 +260,22 @@
         <label style="display:flex; align-items:center; gap:8px; margin-bottom:14px;">
           <input type="checkbox" id="setTestMode" style="width:auto; margin:0;"> Test mode (simulate sends, no real SMS or cost)
         </label>
-        <p class="hint" style="margin-top:0;">Turn off test mode when you're ready to send real SMS through Vacotel.</p>
+        <p class="hint" style="margin-top:0;">Turn off test mode when you're ready to send real SMS through Otus.</p>
         <button class="btn-primary" onclick="saveSettings()">Save settings</button>
       </div>
 
       <div class="card" style="max-width:480px; margin-top:16px;">
-        <div class="section-title" style="margin-top:0;">Billing defaults</div>
-        <label>Default cost per SMS segment ($)</label>
-        <input type="number" id="setDefaultRate" step="0.001" placeholder="0.01">
-        <p class="hint" style="margin-top:0;">Used as the default rate for Send SMS and Launch Campaign. Actual cost = segments × this rate (Unicode messages may use multiple segments).</p>
-      </div>
-
-      <div class="card" style="max-width:480px; margin-top:16px;">
-        <div class="section-title" style="margin-top:0;">Balance top-up</div>
-        <p class="hint" style="margin-top:0;">Vacotel's API doesn't expose an account balance, so balance is tracked manually here and auto-deducted per send using each campaign's rate.</p>
-        <div class="field-row">
-          <div><label>Add amount ($)</label><input type="number" id="topupAmount" step="0.01" placeholder="100.00"></div>
-          <div><label>Note</label><input type="text" id="topupNote" placeholder="e.g. July top-up"></div>
+        <div class="section-title" style="margin-top:0;">Billing</div>
+        <p class="hint" style="margin-top:0;">Account balance is fetched live from your Otus account (EUR). SMS cost is <strong>€0.05 per segment</strong>.</p>
+        <div style="margin-top:10px;">
+          <div class="label" style="font-size:11px; color:var(--muted);">Current balance</div>
+          <div class="stat-value accent" id="settingsBalance" style="font-size:24px;">€0.00</div>
         </div>
-        <button class="btn-primary" onclick="topupBalance()">Add to balance</button>
-        <div class="section-title">Recent transactions</div>
-        <div class="table-wrap"><table id="txTable"><thead><tr><th>Date</th><th>Amount</th><th>Note</th></tr></thead><tbody></tbody></table></div>
       </div>
 
       <div class="card" style="max-width:480px; margin-top:16px;">
         <div class="section-title" style="margin-top:0;">DLR webhook</div>
-        <p class="hint" style="margin-top:0;">Give this URL to Vacotel as your DLR push endpoint (needs to be publicly reachable — see README for a tunnel option during testing):</p>
+        <p class="hint" style="margin-top:0;">Give this URL to Otus as your DLR push endpoint (needs to be publicly reachable — see README for a tunnel option during testing):</p>
         <input type="text" class="mono" readonly id="dlrUrl" onclick="this.select()">
       </div>
     </div>
@@ -345,7 +335,7 @@
     <label>Message roster</label>
     <select id="campRosterId"></select>
     <label>Sender ID (source)</label>
-    <input type="text" id="campSource" placeholder="e.g. YourBrand">
+    <select id="campSource"><option value="">— loading sender IDs —</option></select>
     <div class="field-row">
       <div>
         <label>Rotation</label>
@@ -355,8 +345,8 @@
         </select>
       </div>
       <div>
-        <label>Rate per SMS segment ($)</label>
-        <input type="number" id="campRate" step="0.001" value="0">
+        <label>Rate per SMS segment</label>
+        <input type="text" readonly value="€0.05">
       </div>
     </div>
     <label>Throttle between sends (ms)</label>

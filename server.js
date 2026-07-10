@@ -21,9 +21,13 @@ const {
   portalLogin,
   requestSenderId,
   listSenderIds,
+  deleteSenderIds,
+  getAccountBalance,
   parseStoredCookies,
   validateSenderId
 } = require('./otusPortalClient');
+
+const SMS_RATE_EUR = 0.05;
 
 const app = express();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
@@ -143,6 +147,31 @@ async function withPortalSession(fn) {
 function portalSessionExpired(status, text) {
   return status === 401 || status === 403 || /login|unauthorized|session/i.test(text || '');
 }
+
+async function fetchOtusBalance() {
+  const result = await withPortalSession(async (cookies) => {
+    const out = await getAccountBalance(cookies);
+    if (!out.ok && portalSessionExpired(out.status, out.error)) return { needsRefresh: true };
+    return out;
+  });
+  if (result.needsRefresh) {
+    return { ok: false, error: 'Portal session expired — sign in again', needsRefresh: true };
+  }
+  return result;
+}
+
+async function checkBalanceForCost(estimatedCostEur) {
+  const bal = await fetchOtusBalance();
+  if (!bal.ok) return bal;
+  if (estimatedCostEur > bal.balance) {
+    return {
+      ok: false,
+      error: `Estimated cost (€${estimatedCostEur.toFixed(2)}) exceeds account balance (€${bal.balance.toFixed(2)})`,
+      balance: bal.balance
+    };
+  }
+  return { ok: true, balance: bal.balance };
+}
 function currentBalance() {
   const row = db.prepare('SELECT COALESCE(SUM(amount), 0) as bal FROM balance_transactions').get();
   return row.bal;
@@ -220,7 +249,6 @@ async function processSendQueue({ queue, campaignId, ratePerSms, throttleMs, get
       vendor_message_id, send_error_code, send_status, message_count, message_parts, cost, source, segment_label, sent_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
   `);
-  const insertTx = db.prepare('INSERT INTO balance_transactions (amount, note) VALUES (?, ?)');
 
   for (const item of queue) {
     const text = getText(item);
@@ -261,8 +289,6 @@ async function processSendQueue({ queue, campaignId, ratePerSms, throttleMs, get
       source,
       item.segmentLabel || null
     );
-    if (cost > 0) insertTx.run(-cost, `${notePrefix} SMS to ${phone}`);
-
     if (throttleMs) await new Promise(r => setTimeout(r, throttleMs));
   }
 }
@@ -321,14 +347,14 @@ app.get('/api/settings', (req, res) => {
   res.json({
     vacotel_username: getSetting('vacotel_username'),
     test_mode: getSetting('test_mode') === '1',
-    default_rate_per_sms: parseFloat(getSetting('default_rate_per_sms') || '0') || 0
+    default_rate_per_sms: SMS_RATE_EUR
   });
 });
 
 app.post('/api/settings', (req, res) => {
-  const { test_mode, default_rate_per_sms } = req.body;
+  const { test_mode } = req.body;
   if (test_mode !== undefined) setSetting('test_mode', test_mode ? '1' : '0');
-  if (default_rate_per_sms !== undefined) setSetting('default_rate_per_sms', String(default_rate_per_sms));
+  setSetting('default_rate_per_sms', String(SMS_RATE_EUR));
   res.json({ ok: true, test_mode: getSetting('test_mode') === '1' });
 });
 
@@ -409,18 +435,44 @@ app.post('/api/sender-ids/request', async (req, res) => {
   }
 });
 
-// ---------- balance ----------
-app.get('/api/balance', (req, res) => {
-  const tx = db.prepare('SELECT * FROM balance_transactions ORDER BY id DESC LIMIT 50').all();
-  res.json({ balance: currentBalance(), transactions: tx });
+app.post('/api/sender-ids/delete', async (req, res) => {
+  const ids = Array.isArray(req.body.otus_sender_ids) ? req.body.otus_sender_ids : [];
+  if (!ids.length) return res.status(400).json({ error: 'otus_sender_ids array required' });
+
+  try {
+    const result = await withPortalSession(async (cookies) => {
+      const out = await deleteSenderIds(cookies, ids);
+      if (!out.ok && /login|session|unauthorized/i.test(out.error || '')) return { needsRefresh: true };
+      return out;
+    });
+    if (result.needsRefresh) {
+      return res.status(401).json({ error: 'Portal session expired — sign in again' });
+    }
+    if (!result.ok) {
+      return res.status(400).json({ error: result.error || 'Could not delete sender ID(s)' });
+    }
+    res.json({ ok: true, message: result.message });
+  } catch (e) {
+    console.error('Delete sender ID error:', e);
+    res.status(500).json({ error: e.message || 'Failed to delete sender ID' });
+  }
 });
 
-app.post('/api/balance/topup', (req, res) => {
-  const { amount, note } = req.body;
-  const amt = Number(amount);
-  if (!amt) return res.status(400).json({ error: 'amount required' });
-  db.prepare('INSERT INTO balance_transactions (amount, note) VALUES (?, ?)').run(amt, note || 'Manual top-up');
-  res.json({ ok: true, balance: currentBalance() });
+// ---------- balance (live from Otus account) ----------
+app.get('/api/balance', async (req, res) => {
+  try {
+    const result = await fetchOtusBalance();
+    if (result.needsRefresh) {
+      return res.status(401).json({ error: result.error });
+    }
+    if (!result.ok) {
+      return res.status(502).json({ error: result.error || 'Could not fetch account balance' });
+    }
+    res.json({ balance: result.balance, currency: result.currency, raw: result.raw });
+  } catch (e) {
+    console.error('Balance fetch error:', e);
+    res.status(500).json({ error: e.message || 'Failed to fetch balance' });
+  }
 });
 
 // ---------- quick send (numbers × messages, single SID) ----------
@@ -451,7 +503,7 @@ app.post('/api/quick-send/preview', upload.single('message_file'), (req, res) =>
   if (!messages.length) return res.status(400).json({ error: 'At least one message required (text box or file)' });
 
   const queue = buildCartesianQueue(phones, messages);
-  const rate = parseFloat(req.body.rate_per_sms) || parseFloat(getSetting('default_rate_per_sms') || '0') || 0;
+  const rate = SMS_RATE_EUR;
   const preview = queue.slice(0, 20).map(item => {
     const analysis = analyzeMessage(item.text);
     return { phone: item.phone, text: item.text, parts: analysis.parts };
@@ -472,7 +524,7 @@ app.post('/api/quick-send', upload.single('message_file'), async (req, res) => {
   const source = String(req.body.source || '').trim();
   const phones = parsePhones(req.body.numbers || '');
   const messages = resolveQuickSendMessages(req.body, req.file);
-  const rate = parseFloat(req.body.rate_per_sms) || parseFloat(getSetting('default_rate_per_sms') || '0') || 0;
+  const rate = SMS_RATE_EUR;
   const throttleMs = parseInt(req.body.throttle_ms) || 300;
 
   if (!source) return res.status(400).json({ error: 'Sender ID (SID) required' });
@@ -481,9 +533,16 @@ app.post('/api/quick-send', upload.single('message_file'), async (req, res) => {
 
   const queue = buildCartesianQueue(phones, messages);
   const estCost = estimateCost(queue, rate, null);
-  const balance = currentBalance();
-  if (rate > 0 && estCost > balance) {
-    return res.status(400).json({ error: `Estimated cost ($${estCost.toFixed(2)}) exceeds balance ($${balance.toFixed(2)})`, estimated_cost: estCost, balance });
+  if (getSetting('test_mode') !== '1') {
+    const balCheck = await checkBalanceForCost(estCost);
+    if (!balCheck.ok) {
+      const status = balCheck.needsRefresh ? 401 : 400;
+      return res.status(status).json({
+        error: balCheck.error,
+        estimated_cost: estCost,
+        balance: balCheck.balance
+      });
+    }
   }
 
   const { listId } = createListFromPhones(`Quick Send ${new Date().toISOString().slice(0, 16)}`, phones);
@@ -703,7 +762,7 @@ app.post('/api/campaigns', (req, res) => {
 
   const primaryList = segList ? segList[0].list_id : list_id;
   const primarySource = segList ? segList[0].source : source;
-  const rate = rate_per_sms ?? parseFloat(getSetting('default_rate_per_sms') || '0') ?? 0;
+  const rate = SMS_RATE_EUR;
 
   const info = db.prepare(`
     INSERT INTO campaigns (name, list_id, roster_id, source, rotation_mode, rate_per_sms, throttle_ms)
@@ -804,7 +863,7 @@ app.post('/api/campaigns/launch', upload.fields([
     resolvedSegments.push({ list_id: listId, source, label: seg.label || null });
   }
 
-  const rate = rate_per_sms ?? parseFloat(getSetting('default_rate_per_sms') || '0') ?? 0;
+  const rate = SMS_RATE_EUR;
   const info = db.prepare(`
     INSERT INTO campaigns (name, list_id, roster_id, source, rotation_mode, rate_per_sms, throttle_ms)
     VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -882,9 +941,16 @@ app.post('/api/campaigns/:id/send', async (req, res) => {
   const queue = assignTemplates(interleaved, templates, campaign.rotation_mode);
 
   const estCost = estimateCost(queue, campaign.rate_per_sms, item => fillTemplate(item.template.text, item.lead));
-  const balance = currentBalance();
-  if (campaign.rate_per_sms > 0 && estCost > balance) {
-    return res.status(400).json({ error: `Estimated cost (~$${estCost.toFixed(2)}) exceeds available balance ($${balance.toFixed(2)}). Top up balance first.`, estimated_cost: estCost, balance });
+  if (getSetting('test_mode') !== '1') {
+    const balCheck = await checkBalanceForCost(estCost);
+    if (!balCheck.ok) {
+      const status = balCheck.needsRefresh ? 401 : 400;
+      return res.status(status).json({
+        error: balCheck.error || `Estimated cost (€${estCost.toFixed(2)}) exceeds available balance`,
+        estimated_cost: estCost,
+        balance: balCheck.balance
+      });
+    }
   }
 
   db.prepare("UPDATE campaigns SET status = 'sending', started_at = datetime('now') WHERE id = ?").run(campaign.id);
@@ -950,7 +1016,7 @@ app.get('/api/dlr', handleDlr);
 app.post('/api/dlr', handleDlr);
 
 // ---------- reports ----------
-app.get('/api/reports/summary', (req, res) => {
+app.get('/api/reports/summary', async (req, res) => {
   const stats = db.prepare(`
     SELECT
       COUNT(*) as total_sends,
@@ -971,7 +1037,12 @@ app.get('/api/reports/summary', (req, res) => {
     SELECT COUNT(*) as count FROM sends
     WHERE send_status = 'failed' AND (sent_at IS NULL OR sent_at < datetime('now', '-7 days'))
   `).get().count;
-  res.json({ stats, byErrorCode, legacyFailed, balance: currentBalance() });
+  let balance = null;
+  try {
+    const bal = await fetchOtusBalance();
+    if (bal.ok) balance = bal.balance;
+  } catch (e) { /* dashboard still works without balance */ }
+  res.json({ stats, byErrorCode, legacyFailed, balance });
 });
 
 app.get('/api/campaigns/:id/export.csv', (req, res) => {
@@ -995,4 +1066,4 @@ db.prepare(`
     AND id NOT IN (SELECT DISTINCT campaign_id FROM sends WHERE campaign_id IS NOT NULL)
 `).run();
 
-app.listen(PORT, () => console.log(`Vacotel SMS app running at http://localhost:${PORT}`));
+app.listen(PORT, () => console.log(`Dispatch SMS Console running at http://localhost:${PORT}`));

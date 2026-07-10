@@ -118,7 +118,7 @@ const defaults = {
   vacotel_api_id: '',
   otus_portal_cookies: '',
   test_mode: '1',
-  default_rate_per_sms: '0.01'
+  default_rate_per_sms: '0.05'
 };
 const getStmt = db.prepare('SELECT value FROM settings WHERE key = ?');
 const setStmt = db.prepare('INSERT INTO settings (key, value) VALUES (?, ?)');

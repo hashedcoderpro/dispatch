@@ -80,6 +80,8 @@ async function doLogin() {
     document.getElementById('loginApiToken').value = '';
     showApp(r.username);
     await refreshTestModeUI();
+    await loadSenderIdOptions();
+    startBalancePolling();
     loadDashboard();
     refreshBalancePill();
     toast('Signed in — portal session active');
@@ -96,6 +98,7 @@ async function doLogout() {
   try {
     await api('/api/auth/logout', { method: 'POST' });
   } catch (e) { /* ignore */ }
+  stopBalancePolling();
   showLogin();
 }
 
@@ -109,14 +112,65 @@ document.getElementById('loginUsername').addEventListener('keydown', e => {
   if (e.key === 'Enter') document.getElementById('loginApiToken').focus();
 });
 
-function fmtMoney(n) { return '$' + (Number(n) || 0).toFixed(2); }
+function fmtEur(n) { return '€' + (Number(n) || 0).toFixed(2); }
+function fmtMoney(n) { return fmtEur(n); }
 function fmtDate(s) { if (!s) return '—'; return new Date(s.replace(' ', 'T') + 'Z').toLocaleString(); }
+
+let balancePollTimer = null;
+const SMS_RATE_EUR = 0.05;
+let availableSids = [];
+
+function startBalancePolling() {
+  if (balancePollTimer) clearInterval(balancePollTimer);
+  balancePollTimer = setInterval(() => refreshBalancePill(), 30000);
+}
+
+function stopBalancePolling() {
+  if (balancePollTimer) clearInterval(balancePollTimer);
+  balancePollTimer = null;
+}
 
 async function refreshBalancePill() {
   try {
     const { balance } = await api('/api/balance');
-    document.getElementById('sidebarBalance').textContent = fmtMoney(balance);
+    const text = fmtEur(balance);
+    document.getElementById('sidebarBalance').textContent = text;
+    const settingsBal = document.getElementById('settingsBalance');
+    if (settingsBal) settingsBal.textContent = text;
   } catch (e) {}
+}
+
+function sidOptionLabel(s) {
+  const status = s.status ? ` (${s.status})` : '';
+  return `${s.source}${status}`;
+}
+
+function buildSidSelectOptions(sids, selected) {
+  if (!sids.length) {
+    return '<option value="">— no sender IDs on account —</option>';
+  }
+  const opts = '<option value="">— select sender ID —</option>' +
+    sids.map(s => `<option value="${escapeHtml(s.source)}"${s.source === selected ? ' selected' : ''}>${escapeHtml(sidOptionLabel(s))}</option>`).join('');
+  return opts;
+}
+
+function fillSidSelect(selectEl, selected) {
+  if (!selectEl) return;
+  const prev = selected || selectEl.value;
+  selectEl.innerHTML = buildSidSelectOptions(availableSids, prev);
+}
+
+async function loadSenderIdOptions() {
+  try {
+    const data = await api('/api/sender-ids');
+    availableSids = (data.otus || []).filter(s => s.source);
+    fillSidSelect(document.getElementById('qsSource'));
+    document.querySelectorAll('.seg-source').forEach(sel => fillSidSelect(sel));
+    fillSidSelect(document.getElementById('campSource'));
+    return availableSids;
+  } catch (e) {
+    return availableSids;
+  }
 }
 
 // ---------- DASHBOARD ----------
@@ -124,7 +178,7 @@ async function loadDashboard() {
   const data = await api('/api/reports/summary');
   const s = data.stats;
   const cards = [
-    { label: 'Balance', value: fmtMoney(data.balance), cls: 'accent' },
+    { label: 'Balance', value: data.balance != null ? fmtEur(data.balance) : '—', cls: 'accent' },
     { label: 'Total sends', value: s.total_sends || 0, cls: '' },
     { label: 'Delivered', value: s.delivered || 0, cls: 'accent' },
     { label: 'Failed / undelivered', value: (s.api_failed || 0) + (s.dlr_negative || 0), cls: 'fail' },
@@ -147,7 +201,7 @@ async function loadDashboard() {
 
 // ---------- SEND SMS (quick) ----------
 let qsMessageFileLines = 0;
-let defaultRatePerSms = 0.01;
+let defaultRatePerSms = SMS_RATE_EUR;
 let appTestMode = true;
 
 function updateTestModeUI(testMode) {
@@ -181,7 +235,7 @@ function updateQuickSendCount() {
   const msgCount = msgs || (msgText ? 1 : qsMessageFileLines);
   document.getElementById('qsCountTag').textContent = `${nums} number${nums !== 1 ? 's' : ''} × ${msgCount || 0} message${msgCount !== 1 ? 's' : ''} = ${nums * (msgCount || 0)} SMS`;
   if (defaultRatePerSms && nums && msgCount) {
-    document.getElementById('qsCostHint').textContent = `~${fmtMoney(nums * msgCount * defaultRatePerSms)} est. (1 seg/msg)`;
+    document.getElementById('qsCostHint').textContent = `~${fmtEur(nums * msgCount * defaultRatePerSms)} est. (1 seg/msg)`;
   }
 }
 
@@ -237,7 +291,8 @@ function onLaunchMessageFile(input) {
 async function loadSendPage() {
   try {
     const s = await refreshTestModeUI() || await api('/api/settings');
-    defaultRatePerSms = s.default_rate_per_sms || 0;
+    defaultRatePerSms = s.default_rate_per_sms || SMS_RATE_EUR;
+    await loadSenderIdOptions();
     updateQuickSendCount();
   } catch (e) {}
 }
@@ -245,7 +300,7 @@ async function loadSendPage() {
 function buildQuickSendFormData() {
   const fd = new FormData();
   fd.append('numbers', document.getElementById('qsNumbers').value);
-  fd.append('source', document.getElementById('qsSource').value.trim());
+  fd.append('source', document.getElementById('qsSource').value);
   const msg = document.getElementById('qsMessage').value.trim();
   if (msg) fd.append('message', msg);
   const file = document.getElementById('qsMessageFile').files[0];
@@ -267,8 +322,8 @@ async function previewQuickSend() {
 async function sendQuickSms() {
   const s = await refreshTestModeUI();
   const modeNote = s?.test_mode
-    ? 'TEST MODE — this will NOT send to Vacotel (simulation only).'
-    : 'LIVE MODE — this will send real SMS via Vacotel and may incur charges.';
+    ? 'TEST MODE — this will NOT send to Otus (simulation only).'
+    : 'LIVE MODE — this will send real SMS via Otus and may incur charges.';
   if (!confirm(`Send now?\n\n${modeNote}`)) return;
   try {
     const res = await api('/api/quick-send', { method: 'POST', body: buildQuickSendFormData() });
@@ -282,14 +337,20 @@ async function sendQuickSms() {
 async function loadSenderIds() {
   try {
     const data = await api('/api/sender-ids');
+    availableSids = (data.otus || []).filter(s => s.source);
+    fillSidSelect(document.getElementById('qsSource'));
+    document.querySelectorAll('.seg-source').forEach(sel => fillSidSelect(sel));
+    fillSidSelect(document.getElementById('campSource'));
+
     const otusBody = document.querySelector('#otusSidTable tbody');
     otusBody.innerHTML = (data.otus || []).length
       ? data.otus.map(s => `<tr>
           <td class="mono">${escapeHtml(s.source)}</td>
           <td>${escapeHtml(s.status || '—')}</td>
           <td class="mono">${s.otus_sender_id ?? '—'}</td>
+          <td>${s.otus_sender_id ? `<button class="btn-secondary" style="padding:4px 10px;font-size:11px;" data-otus-id="${s.otus_sender_id}" data-source="${escapeHtml(s.source)}" onclick="deleteSenderId(this)">Delete</button>` : ''}</td>
         </tr>`).join('')
-      : '<tr><td colspan="3" class="muted">No sender IDs on account yet</td></tr>';
+      : '<tr><td colspan="4" class="muted">No sender IDs on account yet</td></tr>';
 
     const localBody = document.querySelector('#localSidTable tbody');
     localBody.innerHTML = (data.requests || []).length
@@ -315,7 +376,23 @@ async function requestSenderId() {
       body: JSON.stringify({ source })
     });
     document.getElementById('sidRequestInput').value = '';
-    toast(`Request submitted for "${res.source}" — pending Vacotel approval`);
+    toast(`Request submitted for "${res.source}" — pending Otus approval`);
+    loadSenderIds();
+  } catch (e) { toast(e.message, true); }
+}
+
+async function deleteSenderId(btn) {
+  const otusId = Number(btn.dataset.otusId);
+  const source = btn.dataset.source || '';
+  if (!otusId) return;
+  if (!confirm(`Delete sender ID "${source}" from your Otus account?\n\nThis cannot be undone.`)) return;
+  try {
+    await api('/api/sender-ids/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ otus_sender_ids: [otusId] })
+    });
+    toast(`Deleted "${source}"`);
     loadSenderIds();
   } catch (e) { toast(e.message, true); }
 }
@@ -336,7 +413,7 @@ function addLaunchSegment(data) {
     </div>
     <div class="field-row">
       <div><label>Client label (optional)</label><input type="text" class="seg-label" placeholder="e.g. Client A" value="${data?.label || ''}"></div>
-      <div><label>Sender ID (SID)</label><input type="text" class="seg-source" placeholder="e.g. BrandA" value="${data?.source || ''}"></div>
+      <div><label>Sender ID (SID)</label><select class="seg-source"></select></div>
     </div>
     <label>Numbers (one per line) or upload .txt / .csv</label>
     <textarea class="seg-phones" placeholder="34612345678&#10;34698765432" oninput="updateLaunchCount()">${data?.phones || ''}</textarea>
@@ -349,6 +426,7 @@ function addLaunchSegment(data) {
     </div>
   `;
   host.appendChild(div);
+  fillSidSelect(div.querySelector('.seg-source'), data?.source || '');
   updateLaunchCount();
 }
 
@@ -420,7 +498,7 @@ async function launchCampaign() {
   const payload = {
     name,
     rotation_mode: document.getElementById('launchRotation').value,
-    rate_per_sms: parseFloat(document.getElementById('launchRate').value) || undefined,
+    rate_per_sms: SMS_RATE_EUR,
     throttle_ms: parseInt(document.getElementById('launchThrottle').value) || 300,
     roster_id: rosterId ? parseInt(rosterId) : null,
     messages: rosterId ? [] : messages,
@@ -545,13 +623,11 @@ let currentCampaignId = null;
 
 async function loadCampaigns() {
   populateLaunchRosters();
+  await loadSenderIdOptions();
   if (!document.querySelector('#launchSegments .segment-block')) addLaunchSegment();
   try {
     const s = await api('/api/settings');
-    if (!document.getElementById('launchRate').value) {
-      document.getElementById('launchRate').placeholder = String(s.default_rate_per_sms || '0');
-    }
-    defaultRatePerSms = s.default_rate_per_sms || 0;
+    defaultRatePerSms = s.default_rate_per_sms || SMS_RATE_EUR;
   } catch (e) {}
 
   const campaigns = await api('/api/campaigns');
@@ -575,6 +651,7 @@ async function loadCampaigns() {
 
 async function populateCampaignSelects() {
   const [lists, rosters] = await Promise.all([api('/api/lead-lists'), api('/api/rosters')]);
+  await loadSenderIdOptions();
   document.getElementById('campListId').innerHTML = lists.map(l => `<option value="${l.id}">${l.name} (${l.lead_count})</option>`).join('') || '<option disabled>Upload a lead list first</option>';
   document.getElementById('campRosterId').innerHTML = rosters.map(r => `<option value="${r.id}">${r.name} (${r.template_count} variants)</option>`).join('') || '<option disabled>Create a message roster first</option>';
 }
@@ -585,9 +662,9 @@ async function createCampaign() {
     name: document.getElementById('campName').value.trim(),
     list_id: document.getElementById('campListId').value,
     roster_id: document.getElementById('campRosterId').value,
-    source: document.getElementById('campSource').value.trim(),
+    source: document.getElementById('campSource').value,
     rotation_mode: document.getElementById('campRotation').value,
-    rate_per_sms: parseFloat(document.getElementById('campRate').value) || 0,
+    rate_per_sms: SMS_RATE_EUR,
     throttle_ms: parseInt(document.getElementById('campThrottle').value) || 300
   };
   if (!payload.name || !payload.source) return toast('Name and Sender ID are required', true);
@@ -649,14 +726,15 @@ async function openCampaignDetail(id) {
 async function sendCampaign() {
   const s = await refreshTestModeUI();
   const modeNote = s?.test_mode
-    ? 'TEST MODE — will NOT reach Vacotel.'
-    : 'LIVE MODE — real SMS will be sent via Vacotel.';
+    ? 'TEST MODE — will NOT reach Otus.'
+    : 'LIVE MODE — real SMS will be sent via Otus.';
   if (!confirm(`Send this campaign now?\n\n${modeNote}`)) return;
   try {
     const res = await api(`/api/campaigns/${currentCampaignId}/send`, { method: 'POST' });
     toast(`Sending to ${res.lead_count} leads — check back in Reports for progress`);
     closeModal('modal-campaign-detail');
     loadCampaigns();
+    refreshBalancePill();
   } catch (e) { toast(e.message, true); }
 }
 
@@ -695,34 +773,17 @@ async function loadSettings() {
   document.getElementById('setSignedInUser').textContent = s.vacotel_username || '—';
   document.getElementById('setTestMode').checked = !!s.test_mode;
   updateTestModeUI(s.test_mode);
-  document.getElementById('setDefaultRate').value = s.default_rate_per_sms ?? '';
-  defaultRatePerSms = s.default_rate_per_sms || 0;
+  defaultRatePerSms = s.default_rate_per_sms || SMS_RATE_EUR;
   document.getElementById('dlrUrl').value = window.location.origin + '/api/dlr';
-
-  const bal = await api('/api/balance');
-  document.getElementById('txTable').querySelector('tbody').innerHTML = bal.transactions.length
-    ? bal.transactions.map(t => `<tr><td>${fmtDate(t.created_at)}</td><td class="mono">${t.amount >= 0 ? '+' : ''}${fmtMoney(t.amount)}</td><td>${t.note || ''}</td></tr>`).join('')
-    : `<tr><td colspan="3" class="empty-state">No transactions yet.</td></tr>`;
+  refreshBalancePill();
 }
 async function saveSettings() {
   const payload = {
-    test_mode: document.getElementById('setTestMode').checked,
-    default_rate_per_sms: parseFloat(document.getElementById('setDefaultRate').value) || 0
+    test_mode: document.getElementById('setTestMode').checked
   };
   await api('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-  toast(payload.test_mode ? 'Saved — TEST mode (no real SMS to Vacotel)' : 'Saved — LIVE mode (real SMS enabled)');
+  toast(payload.test_mode ? 'Saved — TEST mode (no real SMS to Otus)' : 'Saved — LIVE mode (real SMS enabled)');
   loadSettings();
-}
-async function topupBalance() {
-  const amount = parseFloat(document.getElementById('topupAmount').value);
-  const note = document.getElementById('topupNote').value.trim();
-  if (!amount) return toast('Enter an amount', true);
-  await api('/api/balance/topup', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ amount, note }) });
-  toast('Balance updated');
-  document.getElementById('topupAmount').value = '';
-  document.getElementById('topupNote').value = '';
-  loadSettings();
-  refreshBalancePill();
 }
 
 // ---------- init ----------
@@ -732,6 +793,8 @@ async function initApp() {
     if (status.authenticated) {
       showApp(status.username);
       await refreshTestModeUI();
+      await loadSenderIdOptions();
+      startBalancePolling();
       loadDashboard();
       refreshBalancePill();
       return;

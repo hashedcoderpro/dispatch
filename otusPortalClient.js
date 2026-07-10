@@ -77,7 +77,7 @@ async function portalLogin(username, password) {
   return { ok: false, error: msg, raw: data };
 }
 
-async function portalFetch(jar, path, { method = 'GET', body } = {}) {
+async function portalFetch(jar, path, { method = 'GET', body, contentType } = {}) {
   const headers = {
     'User-Agent': 'Dispatch/1.0',
     'X-Requested-With': 'XMLHttpRequest',
@@ -85,13 +85,50 @@ async function portalFetch(jar, path, { method = 'GET', body } = {}) {
     'Cookie': cookieHeader(jar)
   };
   if (body !== undefined) {
-    headers['Content-Type'] = 'application/x-www-form-urlencoded; charset=UTF-8';
+    headers['Content-Type'] = contentType || 'application/x-www-form-urlencoded; charset=UTF-8';
   }
   const resp = await fetch(`${OTUS_BASE_URL}${path}`, { method, headers, body });
   const text = await resp.text();
   let json = null;
   try { json = JSON.parse(text); } catch (_) {}
   return { status: resp.status, json, text };
+}
+
+function parseBalanceText(text) {
+  const raw = String(text || '').trim();
+  const m = raw.match(/^([A-Z]{3})([\d.,]+)$/);
+  if (m) return { currency: m[1], balance: parseFloat(m[2].replace(',', '.')) };
+  const n = parseFloat(raw);
+  if (Number.isFinite(n)) return { currency: 'EUR', balance: n };
+  return null;
+}
+
+async function getAccountBalance(jar) {
+  const { status, text } = await portalFetch(jar, '/Home/GetBalance', { method: 'GET' });
+  const parsed = parseBalanceText(text);
+  if (!parsed) {
+    return { ok: false, status, error: text.slice(0, 100) || `Balance fetch failed (${status})` };
+  }
+  return { ok: true, ...parsed, raw: text.trim() };
+}
+
+async function deleteSenderIds(jar, senderIds) {
+  const ids = senderIds.map(id => Number(id)).filter(n => n > 0);
+  if (!ids.length) return { ok: false, error: 'No sender IDs to delete' };
+
+  const { status, json, text } = await portalFetch(jar, '/Settings/DeleteSenderIds', {
+    method: 'POST',
+    contentType: 'application/json',
+    body: JSON.stringify(ids)
+  });
+
+  if (!json) {
+    return { ok: false, error: text.slice(0, 200) || `Delete failed (${status})` };
+  }
+  if (!json.success) {
+    return { ok: false, error: json.message || json.description || 'Delete rejected', raw: json };
+  }
+  return { ok: true, message: json.message || 'Deleted' };
 }
 
 async function requestSenderId(jar, sender) {
@@ -147,5 +184,8 @@ module.exports = {
   portalLogin,
   requestSenderId,
   listSenderIds,
+  deleteSenderIds,
+  getAccountBalance,
+  parseBalanceText,
   parseStoredCookies
 };
