@@ -1,9 +1,21 @@
+require('dotenv').config();
+
 const express = require('express');
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
 const multer = require('multer');
 const crypto = require('crypto');
 const { parse } = require('csv-parse/sync');
 const path = require('path');
 const db = require('./db');
+const {
+  getUserCredentials,
+  upsertUserCredentials,
+  updateUserPortalCookies,
+  updateUserTestMode,
+  hasUserCredentials,
+  migrateLegacyUserCredentials
+} = require('./credentials');
 const {
   VACOTEL_GATEWAY_URL,
   sendSms,
@@ -39,11 +51,33 @@ const {
 const SMS_RATE_EUR = 0.05;
 
 const app = express();
+if (process.env.TRUST_PROXY === '1') app.set('trust proxy', 1);
+app.use(helmet({
+  contentSecurityPolicy: false,
+  crossOriginEmbedderPolicy: false
+}));
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
 
 const SESSION_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+const COOKIE_SECURE = process.env.TRUST_PROXY === '1' ? '; Secure' : '';
 const PUBLIC_API = new Set(['/api/auth/login', '/api/auth/status']);
 const PUBLIC_ADMIN_API = new Set(['/api/admin/auth/login', '/api/admin/auth/status']);
+
+const userLoginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many login attempts — try again in 15 minutes' }
+});
+
+const adminLoginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 15,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many login attempts — try again in 15 minutes' }
+});
 
 function parseCookies(req) {
   const out = {};
@@ -101,19 +135,35 @@ function verifyAdminSession(req) {
 }
 
 function setSessionCookie(res, username) {
-  res.setHeader('Set-Cookie', `dispatch_session=${signSession(username, 'user')}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${Math.floor(SESSION_MAX_AGE_MS / 1000)}`);
+  res.setHeader('Set-Cookie', `dispatch_session=${signSession(username, 'user')}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${Math.floor(SESSION_MAX_AGE_MS / 1000)}${COOKIE_SECURE}`);
 }
 
 function setAdminSessionCookie(res, username) {
-  res.setHeader('Set-Cookie', `dispatch_admin_session=${signSession(username, 'admin')}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${Math.floor(SESSION_MAX_AGE_MS / 1000)}`);
+  res.setHeader('Set-Cookie', `dispatch_admin_session=${signSession(username, 'admin')}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${Math.floor(SESSION_MAX_AGE_MS / 1000)}${COOKIE_SECURE}`);
 }
 
 function clearSessionCookie(res) {
-  res.setHeader('Set-Cookie', 'dispatch_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0');
+  res.setHeader('Set-Cookie', `dispatch_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${COOKIE_SECURE}`);
 }
 
 function clearAdminSessionCookie(res) {
-  res.setHeader('Set-Cookie', 'dispatch_admin_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0');
+  res.setHeader('Set-Cookie', `dispatch_admin_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${COOKIE_SECURE}`);
+}
+
+function getAdminEnvCredentials() {
+  const username = process.env.ADMIN_USERNAME || '';
+  const password = process.env.ADMIN_PASSWORD || '';
+  return { username, password };
+}
+
+function requireDlrAuth(req, res, next) {
+  const secret = process.env.DLR_SECRET;
+  if (!secret) return next();
+  const token = req.query.token;
+  if (!token || token.length !== secret.length || !crypto.timingSafeEqual(Buffer.from(token), Buffer.from(secret))) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  next();
 }
 
 function requireAuth(req, res, next) {
@@ -130,8 +180,8 @@ function requireAuth(req, res, next) {
   if (PUBLIC_API.has(req.path)) return next();
   const username = verifySession(req);
   if (!username) return res.status(401).json({ error: 'Not authenticated' });
-  if (!getSetting('vacotel_username') || !getSetting('vacotel_api_id')) {
-    return res.status(401).json({ error: 'Vacotel credentials not configured' });
+  if (!hasUserCredentials(username)) {
+    return res.status(401).json({ error: 'Vacotel credentials not configured — sign in again' });
   }
   req.sessionUsername = username;
   next();
@@ -154,43 +204,47 @@ function setSetting(key, value) {
   db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(key, value);
 }
 
-async function refreshPortalSession() {
-  const username = getSetting('vacotel_username');
-  const password = getSetting('vacotel_password');
-  if (!username || !password) return { ok: false, error: 'Portal password not configured' };
-  const login = await portalLogin(username, password);
+async function refreshPortalSession(username) {
+  const creds = getUserCredentials(username);
+  if (!creds) return { ok: false, error: 'Portal credentials not configured' };
+  const login = await portalLogin(username, creds.password);
   if (!login.ok) {
-    setSetting('otus_portal_cookies', '');
+    updateUserPortalCookies(username, null);
     return login;
   }
-  setSetting('otus_portal_cookies', JSON.stringify(login.cookies));
+  updateUserPortalCookies(username, login.cookies);
   return { ok: true, cookies: login.cookies };
 }
 
-async function getPortalCookies({ forceRefresh } = {}) {
+async function getPortalCookies(username, { forceRefresh } = {}) {
   if (!forceRefresh) {
-    const jar = parseStoredCookies(getSetting('otus_portal_cookies'));
-    if (jar) return { ok: true, cookies: jar };
+    const creds = getUserCredentials(username);
+    const jar = creds?.portalCookies;
+    if (jar && (jar['vacotel-Cookie'] || jar['.AspNetCore.Session'])) {
+      return { ok: true, cookies: jar };
+    }
   }
-  return refreshPortalSession();
+  return refreshPortalSession(username);
 }
 
-async function withPortalSession(fn) {
-  let session = await getPortalCookies();
+async function withPortalSession(username, fn) {
+  let session = await getPortalCookies(username);
   if (!session.ok) return session;
   let result = await fn(session.cookies);
   if (result.needsRefresh) {
-    session = await getPortalCookies({ forceRefresh: true });
+    session = await getPortalCookies(username, { forceRefresh: true });
     if (!session.ok) return session;
     result = await fn(session.cookies);
+  }
+  if (!result.needsRefresh && session.cookies) {
+    updateUserPortalCookies(username, session.cookies);
   }
   return result;
 }
 
 async function refreshAdminPortalSession() {
-  const username = getSetting('admin_username');
-  const password = getSetting('admin_password');
-  if (!username || !password) return { ok: false, error: 'Admin credentials not configured' };
+  const { username, password } = getAdminEnvCredentials();
+  if (!username || !password) return { ok: false, error: 'Admin credentials not configured in environment' };
   const login = await portalLogin(username, password);
   if (!login.ok) {
     setSetting('otus_admin_portal_cookies', '');
@@ -232,8 +286,8 @@ function portalSessionExpired(status, text) {
   return status === 401 || status === 403 || /login|unauthorized|session/i.test(text || '');
 }
 
-async function fetchOtusBalance() {
-  const result = await withPortalSession(async (cookies) => {
+async function fetchOtusBalance(username) {
+  const result = await withPortalSession(username, async (cookies) => {
     const out = await getAccountBalance(cookies);
     if (!out.ok && portalSessionExpired(out.status, out.error)) return { needsRefresh: true };
     return out;
@@ -244,8 +298,8 @@ async function fetchOtusBalance() {
   return result;
 }
 
-async function checkBalanceForCost(estimatedCostEur) {
-  const bal = await fetchOtusBalance();
+async function checkBalanceForCost(username, estimatedCostEur) {
+  const bal = await fetchOtusBalance(username);
   if (!bal.ok) return bal;
   if (estimatedCostEur > bal.balance) {
     return {
@@ -364,10 +418,11 @@ function createListFromPhones(name, phones) {
   return { listId, count: phones.length };
 }
 
-async function processSendQueue({ queue, campaignId, ratePerSms, throttleMs, getText, getPhone, getSource, getLeadId, getTemplateId, notePrefix }) {
-  const username = getSetting('vacotel_username');
-  const apiId = getSetting('vacotel_api_id');
-  const testMode = getSetting('test_mode') === '1';
+async function processSendQueue({ username, queue, campaignId, ratePerSms, throttleMs, getText, getPhone, getSource, getLeadId, getTemplateId, notePrefix }) {
+  const creds = getUserCredentials(username);
+  if (!creds) throw new Error('User credentials not found');
+  const apiId = creds.apiId;
+  const testMode = creds.testMode;
 
   const insertSend = db.prepare(`
     INSERT INTO sends (campaign_id, lead_id, template_id, phone, message_text, data_coding,
@@ -385,7 +440,7 @@ async function processSendQueue({ queue, campaignId, ratePerSms, throttleMs, get
     try {
       result = await sendSms({
         baseUrl: VACOTEL_GATEWAY_URL,
-        username,
+        username: creds.username,
         apiId,
         destination: phone,
         source,
@@ -421,14 +476,15 @@ async function processSendQueue({ queue, campaignId, ratePerSms, throttleMs, get
 // ---------- auth ----------
 app.get('/api/auth/status', (req, res) => {
   const username = verifySession(req);
+  const creds = username ? getUserCredentials(username) : null;
   res.json({
     authenticated: !!username,
-    username: username || getSetting('vacotel_username') || null,
-    portal_connected: !!parseStoredCookies(getSetting('otus_portal_cookies'))
+    username: username || null,
+    portal_connected: !!(creds?.portalCookies)
   });
 });
 
-app.post('/api/auth/login', async (req, res) => {
+app.post('/api/auth/login', userLoginLimiter, async (req, res) => {
   const username = String(req.body.username || '').trim();
   const password = String(req.body.password || '');
   const apiId = String(req.body.apiId || '').trim();
@@ -452,39 +508,50 @@ app.post('/api/auth/login', async (req, res) => {
     return res.status(401).json({ error: `Portal login failed: ${portal.error}` });
   }
 
-  setSetting('vacotel_username', username);
-  setSetting('vacotel_password', password);
-  setSetting('vacotel_api_id', apiId);
+  const existing = getUserCredentials(username);
+  upsertUserCredentials(username, {
+    password,
+    apiId,
+    portalCookies: portal.cookies,
+    testMode: existing ? existing.testMode : true
+  });
   setSetting('vacotel_base_url', VACOTEL_GATEWAY_URL);
-  setSetting('otus_portal_cookies', JSON.stringify(portal.cookies));
   setSessionCookie(res, username);
   res.json({ ok: true, username, portal_connected: true });
 });
 
 app.post('/api/auth/logout', (req, res) => {
   clearSessionCookie(res);
-  setSetting('otus_portal_cookies', '');
   res.json({ ok: true });
 });
 
 // ---------- admin auth ----------
 app.get('/api/admin/auth/status', (req, res) => {
   const username = verifyAdminSession(req);
+  const envAdmin = getAdminEnvCredentials();
   res.json({
     authenticated: !!username,
-    username: username || getSetting('admin_username') || null,
+    username: username || envAdmin.username || null,
     portal_connected: !!parseStoredCookies(getSetting('otus_admin_portal_cookies'))
   });
 });
 
-app.post('/api/admin/auth/login', async (req, res) => {
+app.post('/api/admin/auth/login', adminLoginLimiter, async (req, res) => {
   const username = String(req.body.username || '').trim();
   const password = String(req.body.password || '');
   if (!username || !password) {
     return res.status(400).json({ error: 'Username and password are required' });
   }
 
-  const portal = await portalLogin(username, password);
+  const envAdmin = getAdminEnvCredentials();
+  if (!envAdmin.username || !envAdmin.password) {
+    return res.status(503).json({ error: 'Admin credentials not configured on server — set ADMIN_USERNAME and ADMIN_PASSWORD in .env' });
+  }
+  if (username !== envAdmin.username || password !== envAdmin.password) {
+    return res.status(401).json({ error: 'Invalid admin credentials' });
+  }
+
+  const portal = await portalLogin(envAdmin.username, envAdmin.password);
   if (!portal.ok) {
     return res.status(401).json({ error: `Portal login failed: ${portal.error}` });
   }
@@ -493,8 +560,6 @@ app.post('/api/admin/auth/login', async (req, res) => {
     return res.status(401).json({ error: check.error || 'This account does not have admin access' });
   }
 
-  setSetting('admin_username', username);
-  setSetting('admin_password', password);
   setSetting('otus_admin_portal_cookies', JSON.stringify(portal.cookies));
   setAdminSessionCookie(res, username);
   restartSidAutoPoller();
@@ -503,7 +568,6 @@ app.post('/api/admin/auth/login', async (req, res) => {
 
 app.post('/api/admin/auth/logout', (req, res) => {
   clearAdminSessionCookie(res);
-  setSetting('otus_admin_portal_cookies', '');
   res.json({ ok: true });
 });
 
@@ -643,24 +707,26 @@ app.put('/api/admin/sid-auto', (req, res) => {
 
 // ---------- settings ----------
 app.get('/api/settings', (req, res) => {
+  const creds = getUserCredentials(req.sessionUsername);
   res.json({
-    vacotel_username: getSetting('vacotel_username'),
-    test_mode: getSetting('test_mode') === '1',
+    vacotel_username: req.sessionUsername,
+    test_mode: creds?.testMode ?? true,
     default_rate_per_sms: SMS_RATE_EUR
   });
 });
 
 app.post('/api/settings', (req, res) => {
   const { test_mode } = req.body;
-  if (test_mode !== undefined) setSetting('test_mode', test_mode ? '1' : '0');
+  if (test_mode !== undefined) updateUserTestMode(req.sessionUsername, !!test_mode);
   setSetting('default_rate_per_sms', String(SMS_RATE_EUR));
-  res.json({ ok: true, test_mode: getSetting('test_mode') === '1' });
+  const creds = getUserCredentials(req.sessionUsername);
+  res.json({ ok: true, test_mode: creds?.testMode ?? true });
 });
 
 // ---------- sender IDs (Otus portal) ----------
 app.get('/api/sender-ids', async (req, res) => {
   try {
-    const result = await withPortalSession(async (cookies) => {
+    const result = await withPortalSession(req.sessionUsername, async (cookies) => {
       const list = await listSenderIds(cookies);
       if (!list.ok && portalSessionExpired(list.status, list.error)) {
         return { needsRefresh: true };
@@ -701,7 +767,7 @@ app.post('/api/sender-ids/request', async (req, res) => {
   if (!check.ok) return res.status(400).json({ error: check.error });
 
   try {
-    const result = await withPortalSession(async (cookies) => {
+    const result = await withPortalSession(req.sessionUsername, async (cookies) => {
       const out = await requestSenderId(cookies, source);
       if (!out.ok && /login|session|unauthorized/i.test(out.error || '')) {
         return { needsRefresh: true };
@@ -739,7 +805,7 @@ app.post('/api/sender-ids/delete', async (req, res) => {
   if (!ids.length) return res.status(400).json({ error: 'otus_sender_ids array required' });
 
   try {
-    const result = await withPortalSession(async (cookies) => {
+    const result = await withPortalSession(req.sessionUsername, async (cookies) => {
       const out = await deleteSenderIds(cookies, ids);
       if (!out.ok && /login|session|unauthorized/i.test(out.error || '')) return { needsRefresh: true };
       return out;
@@ -760,7 +826,7 @@ app.post('/api/sender-ids/delete', async (req, res) => {
 // ---------- balance (live from Otus account) ----------
 app.get('/api/balance', async (req, res) => {
   try {
-    const result = await fetchOtusBalance();
+    const result = await fetchOtusBalance(req.sessionUsername);
     if (result.needsRefresh) {
       return res.status(401).json({ error: result.error });
     }
@@ -822,8 +888,9 @@ app.post('/api/quick-send', upload.none(), async (req, res) => {
 
   const queue = buildCartesianQueue(phones, messages);
   const estCost = estimateCost(queue, rate, null);
-  if (getSetting('test_mode') !== '1') {
-    const balCheck = await checkBalanceForCost(estCost);
+  const creds = getUserCredentials(req.sessionUsername);
+  if (!creds?.testMode) {
+    const balCheck = await checkBalanceForCost(req.sessionUsername, estCost);
     if (!balCheck.ok) {
       const status = balCheck.needsRefresh ? 401 : 400;
       return res.status(status).json({
@@ -847,6 +914,7 @@ app.post('/api/quick-send', upload.none(), async (req, res) => {
 
   try {
     await processSendQueue({
+      username: req.sessionUsername,
       queue,
       campaignId,
       ratePerSms: rate,
@@ -1221,8 +1289,9 @@ app.post('/api/campaigns/:id/send', async (req, res) => {
   const queue = assignTemplates(interleaved, templates, campaign.rotation_mode);
 
   const estCost = estimateCost(queue, campaign.rate_per_sms, item => fillTemplate(item.template.text, item.lead));
-  if (getSetting('test_mode') !== '1') {
-    const balCheck = await checkBalanceForCost(estCost);
+  const creds = getUserCredentials(req.sessionUsername);
+  if (!creds?.testMode) {
+    const balCheck = await checkBalanceForCost(req.sessionUsername, estCost);
     if (!balCheck.ok) {
       const status = balCheck.needsRefresh ? 401 : 400;
       return res.status(status).json({
@@ -1237,6 +1306,7 @@ app.post('/api/campaigns/:id/send', async (req, res) => {
   res.json({ ok: true, started: true, lead_count: queue.length, segment_count: segments.length });
 
   await processSendQueue({
+    username: req.sessionUsername,
     queue,
     campaignId: campaign.id,
     ratePerSms: campaign.rate_per_sms,
@@ -1292,8 +1362,8 @@ function handleDlr(req, res) {
 
   res.json({ ok: true, matched: result.changes > 0 });
 }
-app.get('/api/dlr', handleDlr);
-app.post('/api/dlr', handleDlr);
+app.get('/api/dlr', requireDlrAuth, handleDlr);
+app.post('/api/dlr', requireDlrAuth, handleDlr);
 
 // ---------- traffic report (live from Otus portal) ----------
 app.get('/api/traffic', async (req, res) => {
@@ -1309,7 +1379,7 @@ app.get('/api/traffic', async (req, res) => {
   }
 
   try {
-    const result = await withPortalSession(async (cookies) => {
+    const result = await withPortalSession(req.sessionUsername, async (cookies) => {
       const out = await readTraffic(cookies, filters);
       if (!out.ok && portalSessionExpired(out.status, out.error)) return { needsRefresh: true };
       return out;
@@ -1359,7 +1429,7 @@ app.get('/api/reports/summary', async (req, res) => {
   `).get().count;
   let balance = null;
   try {
-    const bal = await fetchOtusBalance();
+    const bal = await fetchOtusBalance(req.sessionUsername);
     if (bal.ok) balance = bal.balance;
   } catch (e) { /* dashboard still works without balance */ }
   res.json({ stats, byErrorCode, legacyFailed, balance });
@@ -1384,7 +1454,8 @@ let sidAutoTimer = null;
 
 async function runSidAutoApprove() {
   if (getSetting('sid_auto_approve') !== '1') return;
-  if (!getSetting('admin_username') || !getSetting('admin_password')) return;
+  const { username, password } = getAdminEnvCredentials();
+  if (!username || !password) return;
 
   const log = { at: new Date().toISOString(), approved: 0, errors: [] };
   try {
@@ -1416,7 +1487,8 @@ function restartSidAutoPoller() {
   if (sidAutoTimer) clearInterval(sidAutoTimer);
   sidAutoTimer = null;
   if (getSetting('sid_auto_approve') !== '1') return;
-  if (!getSetting('admin_username') || !getSetting('admin_password')) return;
+  const { username, password } = getAdminEnvCredentials();
+  if (!username || !password) return;
   const ms = Math.max(60000, parseInt(getSetting('sid_auto_interval_ms')) || 180000);
   sidAutoTimer = setInterval(() => runSidAutoApprove(), ms);
   runSidAutoApprove();
@@ -1430,7 +1502,16 @@ db.prepare(`
 `).run();
 
 app.listen(PORT, () => {
+  migrateLegacyUserCredentials(getSetting);
+  if (getSetting('admin_password')) {
+    console.warn('Legacy admin_password found in database — configure ADMIN_USERNAME and ADMIN_PASSWORD in .env instead');
+  }
   console.log(`Dispatch SMS Console running at http://localhost:${PORT}`);
   console.log(`Admin console at http://localhost:${PORT}/admin`);
+  if (process.env.DLR_SECRET) {
+    console.log('DLR webhook requires ?token=... query parameter');
+  } else {
+    console.warn('DLR_SECRET not set — /api/dlr is unauthenticated (set DLR_SECRET in production)');
+  }
   restartSidAutoPoller();
 });

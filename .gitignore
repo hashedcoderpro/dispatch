@@ -4,6 +4,7 @@ data.sqlite-*
 data.sqlite-journal
 .env
 .env.*
+!.env.example
 *.log
 .DS_Store
 Thumbs.db

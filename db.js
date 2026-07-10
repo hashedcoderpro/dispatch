@@ -118,6 +118,15 @@ CREATE TABLE IF NOT EXISTS segment_templates (
   updated_at TEXT DEFAULT (datetime('now')),
   UNIQUE(segment, purpose, sort_order)
 );
+
+CREATE TABLE IF NOT EXISTS user_credentials (
+  username TEXT PRIMARY KEY,
+  password_enc TEXT NOT NULL,
+  api_id_enc TEXT NOT NULL,
+  portal_cookies_enc TEXT,
+  test_mode TEXT NOT NULL DEFAULT '1',
+  updated_at TEXT DEFAULT (datetime('now'))
+);
 `);
 
 // seed default settings if missing
