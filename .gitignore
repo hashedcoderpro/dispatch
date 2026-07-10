@@ -9,6 +9,8 @@ data.sqlite-journal
 Thumbs.db
 otus-sid-request.har
 otus-sid-delete.har
+read-traffic
+traffic-refresh
 
 # Duplicate copy from original zip — app lives at repo root
 vacotel-sms-app/

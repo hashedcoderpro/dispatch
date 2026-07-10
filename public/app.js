@@ -7,7 +7,7 @@ function showPage(name) {
   document.querySelectorAll('.nav-item').forEach(b => b.classList.remove('active'));
   document.getElementById('page-' + name).classList.add('active');
   document.querySelector(`.nav-item[data-page="${name}"]`).classList.add('active');
-  const loaders = { dashboard: loadDashboard, send: loadSendPage, 'sender-ids': loadSenderIds, leads: loadLeads, messages: loadRosters, campaigns: loadCampaigns, reports: loadReports, settings: loadSettings };
+  const loaders = { dashboard: loadDashboard, send: loadSendPage, 'sender-ids': loadSenderIds, campaigns: loadCampaigns, reports: loadTrafficPage, settings: loadSettings };
   loaders[name] && loaders[name]();
 }
 
@@ -99,6 +99,7 @@ async function doLogout() {
     await api('/api/auth/logout', { method: 'POST' });
   } catch (e) { /* ignore */ }
   stopBalancePolling();
+  stopTrafficPolling();
   showLogin();
 }
 
@@ -165,8 +166,13 @@ async function loadSenderIdOptions() {
     const data = await api('/api/sender-ids');
     availableSids = (data.otus || []).filter(s => s.source);
     fillSidSelect(document.getElementById('qsSource'));
-    document.querySelectorAll('.seg-source').forEach(sel => fillSidSelect(sel));
-    fillSidSelect(document.getElementById('campSource'));
+    fillSidSelect(document.getElementById('launchSource'));
+    const trafficSel = document.getElementById('trafficSenderFilter');
+    if (trafficSel) {
+      const prev = trafficSel.value;
+      trafficSel.innerHTML = '<option value="">All</option>' +
+        availableSids.map(s => `<option value="${escapeHtml(s.source)}"${s.source === prev ? ' selected' : ''}>${escapeHtml(sidOptionLabel(s))}</option>`).join('');
+    }
     return availableSids;
   } catch (e) {
     return availableSids;
@@ -278,7 +284,8 @@ function clearLaunchMessageFile() {
     document.getElementById('launchMessageFile'),
     document.getElementById('launchMessageFileLabel'),
     'Upload message file (.txt/.csv)',
-    'launchMessageFileWrap'
+    'launchMessageFileWrap',
+    () => updateLaunchCount()
   );
 }
 
@@ -286,6 +293,78 @@ function onLaunchMessageFile(input) {
   const file = input.files[0];
   document.getElementById('launchMessageFileLabel').textContent = file?.name || 'Upload message file (.txt/.csv)';
   setFileDropState('launchMessageFileWrap', !!file);
+  updateLaunchCount();
+}
+
+function onLaunchLeadsFile(input) {
+  const file = input.files[0];
+  document.getElementById('launchLeadsFileLabel').textContent = file?.name || 'Upload leads (.txt / .csv)';
+  setFileDropState('launchLeadsFileWrap', !!file);
+  updateLaunchCount();
+}
+
+function clearLaunchLeadsFile() {
+  clearFileInput(
+    document.getElementById('launchLeadsFile'),
+    document.getElementById('launchLeadsFileLabel'),
+    'Upload leads (.txt / .csv)',
+    'launchLeadsFileWrap',
+    () => updateLaunchCount()
+  );
+}
+
+function updateLaunchCount() {
+  const phones = countLines(document.getElementById('launchPhones').value);
+  const hasLeadsFile = document.getElementById('launchLeadsFile').files[0];
+  const msgs = countLines(document.getElementById('launchMessages').value);
+  const hasMsgFile = document.getElementById('launchMessageFile').files[0];
+  const leadLabel = phones ? `${phones} lead${phones !== 1 ? 's' : ''}` : (hasLeadsFile ? 'leads from file' : '0 leads');
+  const msgLabel = msgs ? `${msgs} message${msgs !== 1 ? 's' : ''}` : (hasMsgFile ? 'messages from file' : '0 messages');
+  document.getElementById('launchCountTag').textContent = `${leadLabel} · ${msgLabel}`;
+}
+
+async function launchCampaign() {
+  const name = document.getElementById('launchName').value.trim();
+  if (!name) return toast('Campaign name required', true);
+
+  const source = document.getElementById('launchSource').value;
+  if (!source) return toast('Select a Sender ID (SID)', true);
+
+  const phones = document.getElementById('launchPhones').value.trim();
+  const leadsFile = document.getElementById('launchLeadsFile').files[0];
+  if (!phones && !leadsFile) return toast('Add leads (paste numbers or upload a file)', true);
+
+  const messages = document.getElementById('launchMessages').value.split('\n').map(m => m.trim()).filter(Boolean);
+  const msgFile = document.getElementById('launchMessageFile').files[0];
+  if (!messages.length && !msgFile) return toast('Add messages (paste or upload a file)', true);
+
+  const fd = new FormData();
+  if (leadsFile) fd.append('segment_files', leadsFile);
+
+  const payload = {
+    name,
+    rotation_mode: document.getElementById('launchRotation').value,
+    rate_per_sms: SMS_RATE_EUR,
+    throttle_ms: parseInt(document.getElementById('launchThrottle').value) || 300,
+    roster_id: null,
+    messages,
+    segments: [{ source, phones }]
+  };
+  fd.append('payload', JSON.stringify(payload));
+  if (msgFile) fd.append('message_file', msgFile);
+
+  try {
+    const res = await api('/api/campaigns/launch', { method: 'POST', body: fd });
+    toast('Campaign created — preview and send below');
+    document.getElementById('launchName').value = '';
+    document.getElementById('launchPhones').value = '';
+    document.getElementById('launchMessages').value = '';
+    clearLaunchLeadsFile();
+    clearLaunchMessageFile();
+    updateLaunchCount();
+    loadCampaigns();
+    openCampaignDetail(res.campaign_id);
+  } catch (e) { toast(e.message, true); }
 }
 
 async function loadSendPage() {
@@ -327,7 +406,7 @@ async function sendQuickSms() {
   if (!confirm(`Send now?\n\n${modeNote}`)) return;
   try {
     const res = await api('/api/quick-send', { method: 'POST', body: buildQuickSendFormData() });
-    toast(`Sending ${res.total_sms} SMS — check Reports for results`);
+    toast(`Sending ${res.total_sms} SMS — check Traffic Report for delivery status`);
     document.getElementById('qsPreviewWrap').innerHTML = '';
     refreshBalancePill();
   } catch (e) { toast(e.message, true); }
@@ -339,8 +418,7 @@ async function loadSenderIds() {
     const data = await api('/api/sender-ids');
     availableSids = (data.otus || []).filter(s => s.source);
     fillSidSelect(document.getElementById('qsSource'));
-    document.querySelectorAll('.seg-source').forEach(sel => fillSidSelect(sel));
-    fillSidSelect(document.getElementById('campSource'));
+    fillSidSelect(document.getElementById('launchSource'));
 
     const otusBody = document.querySelector('#otusSidTable tbody');
     otusBody.innerHTML = (data.otus || []).length
@@ -351,16 +429,6 @@ async function loadSenderIds() {
           <td>${s.otus_sender_id ? `<button class="btn-secondary" style="padding:4px 10px;font-size:11px;" data-otus-id="${s.otus_sender_id}" data-source="${escapeHtml(s.source)}" onclick="deleteSenderId(this)">Delete</button>` : ''}</td>
         </tr>`).join('')
       : '<tr><td colspan="4" class="muted">No sender IDs on account yet</td></tr>';
-
-    const localBody = document.querySelector('#localSidTable tbody');
-    localBody.innerHTML = (data.requests || []).length
-      ? data.requests.map(r => `<tr>
-          <td class="mono">${escapeHtml(r.source)}</td>
-          <td>${escapeHtml(r.status)}</td>
-          <td class="mono">${escapeHtml(r.created_at || '')}</td>
-          <td>${escapeHtml(r.description || '')}</td>
-        </tr>`).join('')
-      : '<tr><td colspan="4" class="muted">No requests submitted via Dispatch yet</td></tr>';
   } catch (e) {
     toast(e.message, true);
   }
@@ -397,243 +465,17 @@ async function deleteSenderId(btn) {
   } catch (e) { toast(e.message, true); }
 }
 
-// ---------- LAUNCH CAMPAIGN ----------
-let launchSegmentCount = 0;
-
-function addLaunchSegment(data) {
-  const idx = launchSegmentCount++;
-  const host = document.getElementById('launchSegments');
-  const div = document.createElement('div');
-  div.className = 'segment-block';
-  div.dataset.idx = idx;
-  div.innerHTML = `
-    <div class="seg-header">
-      <strong>Client segment ${idx + 1}</strong>
-      ${idx > 0 ? `<button class="btn-secondary" style="padding:4px 10px;font-size:11px;" onclick="this.closest('.segment-block').remove(); updateLaunchCount()">Remove</button>` : ''}
-    </div>
-    <div class="field-row">
-      <div><label>Client label (optional)</label><input type="text" class="seg-label" placeholder="e.g. Client A" value="${data?.label || ''}"></div>
-      <div><label>Sender ID (SID)</label><select class="seg-source"></select></div>
-    </div>
-    <label>Numbers (one per line) or upload .txt / .csv</label>
-    <textarea class="seg-phones" placeholder="34612345678&#10;34698765432" oninput="updateLaunchCount()">${data?.phones || ''}</textarea>
-    <div class="file-drop-wrap seg-file-wrap">
-      <div class="file-drop" onclick="this.querySelector('input').click()">
-        <div class="seg-file-label">Upload .txt or .csv for this client</div>
-        <input type="file" class="seg-file" accept=".csv,.txt" onchange="onSegmentFile(this)">
-      </div>
-      <button type="button" class="file-drop-close" title="Remove file" onclick="event.stopPropagation(); clearSegmentFile(this)">×</button>
-    </div>
-  `;
-  host.appendChild(div);
-  fillSidSelect(div.querySelector('.seg-source'), data?.source || '');
-  updateLaunchCount();
-}
-
-function onSegmentFile(input) {
-  const file = input.files[0];
-  const wrap = input.closest('.seg-file-wrap');
-  const label = wrap?.querySelector('.seg-file-label');
-  if (label) label.textContent = file?.name || 'Upload .txt or .csv for this client';
-  if (wrap) wrap.classList.toggle('has-file', !!file);
-  updateLaunchCount();
-}
-
-function clearSegmentFile(btn) {
-  const wrap = btn.closest('.seg-file-wrap');
-  const input = wrap?.querySelector('.seg-file');
-  const label = wrap?.querySelector('.seg-file-label');
-  if (input) input.value = '';
-  if (label) label.textContent = 'Upload .txt or .csv for this client';
-  if (wrap) wrap.classList.remove('has-file');
-  updateLaunchCount();
-}
-
-function updateLaunchCount() {
-  let total = 0;
-  let segs = 0;
-  document.querySelectorAll('#launchSegments .segment-block').forEach(block => {
-    const phones = countLines(block.querySelector('.seg-phones').value);
-    const hasFile = block.querySelector('.seg-file').files[0];
-    if (phones || hasFile) { segs++; total += phones || 0; }
-  });
-  document.getElementById('launchCountTag').textContent = `${total || '?'} leads across ${segs} segment${segs !== 1 ? 's' : ''}`;
-}
-
-async function populateLaunchRosters() {
-  const rosters = await api('/api/rosters');
-  const sel = document.getElementById('launchRosterId');
-  sel.innerHTML = '<option value="">— create from above —</option>' +
-    rosters.map(r => `<option value="${r.id}">${r.name} (${r.template_count} msgs)</option>`).join('');
-}
-
-async function launchCampaign() {
-  const name = document.getElementById('launchName').value.trim();
-  if (!name) return toast('Campaign name required', true);
-
-  const segments = [];
-  const blocks = document.querySelectorAll('#launchSegments .segment-block');
-  if (!blocks.length) return toast('Add at least one client segment', true);
-
-  const fd = new FormData();
-  for (const block of blocks) {
-    const source = block.querySelector('.seg-source').value.trim();
-    if (!source) return toast('Each client segment needs a Sender ID (SID)', true);
-    const phones = block.querySelector('.seg-phones').value.trim();
-    const file = block.querySelector('.seg-file').files[0];
-    if (!phones && !file) return toast('Each segment needs numbers (paste or upload .txt / .csv)', true);
-    segments.push({
-      label: block.querySelector('.seg-label').value.trim(),
-      source,
-      phones
-    });
-    if (file) fd.append('segment_files', file);
-  }
-
-  const rosterId = document.getElementById('launchRosterId').value;
-  const messages = document.getElementById('launchMessages').value.split('\n').map(m => m.trim()).filter(Boolean);
-  const msgFile = document.getElementById('launchMessageFile').files[0];
-  if (!rosterId && !messages.length && !msgFile) return toast('Add messages (paste, upload, or pick a saved roster)', true);
-
-  const payload = {
-    name,
-    rotation_mode: document.getElementById('launchRotation').value,
-    rate_per_sms: SMS_RATE_EUR,
-    throttle_ms: parseInt(document.getElementById('launchThrottle').value) || 300,
-    roster_id: rosterId ? parseInt(rosterId) : null,
-    messages: rosterId ? [] : messages,
-    segments
-  };
-  fd.append('payload', JSON.stringify(payload));
-  if (msgFile && !rosterId) fd.append('message_file', msgFile);
-
-  try {
-    const res = await api('/api/campaigns/launch', { method: 'POST', body: fd });
-    toast(`Campaign created (${res.segments} client${res.segments > 1 ? 's' : ''}) — open it below to preview & send`);
-    document.getElementById('launchName').value = '';
-    document.getElementById('launchMessages').value = '';
-    clearLaunchMessageFile();
-    loadCampaigns();
-    openCampaignDetail(res.campaign_id);
-  } catch (e) { toast(e.message, true); }
-}
-
-// ---------- LEADS ----------
-async function loadLeads() {
-  const lists = await api('/api/lead-lists');
-  const host = document.getElementById('leadLists');
-  if (!lists.length) {
-    host.innerHTML = `<div class="empty-state"><div class="big">📋</div>No lead lists yet. Paste numbers or upload a .txt / .csv file.</div>`;
-    return;
-  }
-  host.innerHTML = lists.map(l => `
-    <div class="list-item">
-      <div>
-        <div class="li-title">${l.name}</div>
-        <div class="li-meta">${l.lead_count} contacts · uploaded ${fmtDate(l.created_at)}</div>
-      </div>
-      <div style="display:flex; gap:8px;">
-        <button class="btn-secondary" onclick="event.stopPropagation(); deleteList(${l.id})">Delete</button>
-      </div>
-    </div>
-  `).join('');
-}
-async function deleteList(id) {
-  if (!confirm('Delete this lead list and all its contacts?')) return;
-  await api('/api/lead-lists/' + id, { method: 'DELETE' });
-  toast('List deleted');
-  loadLeads();
-}
-async function uploadLeads() {
-  const name = document.getElementById('leadListName').value.trim();
-  const file = document.getElementById('leadFileInput').files[0];
-  const numbers = document.getElementById('leadNumbersText').value.trim();
-  if (!file && !numbers) return toast('Paste numbers or choose a file first', true);
-  const fd = new FormData();
-  if (file) fd.append('file', file);
-  if (numbers) fd.append('numbers', numbers);
-  if (name) fd.append('name', name);
-  try {
-    const res = await api('/api/lead-lists', { method: 'POST', body: fd });
-    toast(`Imported ${res.inserted} contacts (${res.skipped} skipped as invalid/duplicate)`);
-    closeModal('modal-upload-leads');
-    document.getElementById('leadListName').value = '';
-    document.getElementById('leadNumbersText').value = '';
-    document.getElementById('leadFileInput').value = '';
-    document.getElementById('leadFileLabel').textContent = 'Click to upload .txt or .csv';
-    loadLeads();
-  } catch (e) { toast(e.message, true); }
-}
-
-// ---------- ROSTERS ----------
-async function loadRosters() {
-  const rosters = await api('/api/rosters');
-  const host = document.getElementById('rosterLists');
-  if (!rosters.length) {
-    host.innerHTML = `<div class="empty-state"><div class="big">💬</div>No message rosters yet. Create one with 50–100 variants.</div>`;
-    return;
-  }
-  host.innerHTML = rosters.map(r => `
-    <div class="list-item">
-      <div>
-        <div class="li-title">${r.name}</div>
-        <div class="li-meta">${r.template_count} message variants · created ${fmtDate(r.created_at)}</div>
-      </div>
-      <div style="display:flex; gap:8px;">
-        <button class="btn-secondary" onclick="event.stopPropagation(); deleteRoster(${r.id})">Delete</button>
-      </div>
-    </div>
-  `).join('');
-}
-async function deleteRoster(id) {
-  if (!confirm('Delete this roster and all its message variants?')) return;
-  await api('/api/rosters/' + id, { method: 'DELETE' });
-  toast('Roster deleted');
-  loadRosters();
-}
-async function createRoster() {
-  const name = document.getElementById('rosterName').value.trim();
-  const fileInput = document.getElementById('rosterFileInput');
-  if (!name) return toast('Give the roster a name', true);
-  try {
-    let res;
-    if (fileInput.files[0]) {
-      const fd = new FormData();
-      fd.append('file', fileInput.files[0]);
-      fd.append('name', name);
-      res = await api('/api/rosters/upload', { method: 'POST', body: fd });
-    } else {
-      const text = document.getElementById('rosterTextarea').value;
-      const messages = text.split('\n').map(m => m.trim()).filter(Boolean);
-      if (!messages.length) return toast('Add at least one message, or upload a file', true);
-      res = await api('/api/rosters', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, messages }) });
-    }
-    toast(`Saved roster with ${res.inserted} messages`);
-    closeModal('modal-upload-roster');
-    document.getElementById('rosterName').value = '';
-    document.getElementById('rosterTextarea').value = '';
-    fileInput.value = '';
-    document.getElementById('rosterFileLabel').textContent = 'Or click to upload a .txt/.csv';
-    loadRosters();
-  } catch (e) { toast(e.message, true); }
-}
-
 // ---------- CAMPAIGNS ----------
 let currentCampaignId = null;
 
 async function loadCampaigns() {
-  populateLaunchRosters();
   await loadSenderIdOptions();
-  if (!document.querySelector('#launchSegments .segment-block')) addLaunchSegment();
-  try {
-    const s = await api('/api/settings');
-    defaultRatePerSms = s.default_rate_per_sms || SMS_RATE_EUR;
-  } catch (e) {}
+  updateLaunchCount();
 
   const campaigns = await api('/api/campaigns');
   const host = document.getElementById('campaignList');
   if (!campaigns.length) {
-    host.innerHTML = `<div class="empty-state"><div class="big">🚀</div>No campaigns yet. Create one from a lead list + message roster.</div>`;
+    host.innerHTML = `<div class="empty-state"><div class="big">🚀</div>No campaigns yet. Set up a campaign above.</div>`;
     return;
   }
   host.innerHTML = campaigns.map(c => {
@@ -642,47 +484,17 @@ async function loadCampaigns() {
     <div class="list-item" onclick="openCampaignDetail(${c.id})">
       <div>
         <div class="li-title">${c.name} <span class="badge ${statusBadge}" style="margin-left:6px;">${c.status}</span></div>
-        <div class="li-meta">${c.list_name} → ${c.roster_name} · ${c.total_leads} leads · sent ${c.sent_count} · delivered ${c.delivered_count} · failed ${c.failed_count}${c.source ? ' · SID ' + escapeHtml(c.source) : ''}</div>
+        <div class="li-meta">${c.total_leads} leads · sent ${c.sent_count} · delivered ${c.delivered_count} · failed ${c.failed_count}${c.source ? ' · SID ' + escapeHtml(c.source) : ''}</div>
       </div>
       <div class="muted">→</div>
     </div>`;
   }).join('');
 }
 
-async function populateCampaignSelects() {
-  const [lists, rosters] = await Promise.all([api('/api/lead-lists'), api('/api/rosters')]);
-  await loadSenderIdOptions();
-  document.getElementById('campListId').innerHTML = lists.map(l => `<option value="${l.id}">${l.name} (${l.lead_count})</option>`).join('') || '<option disabled>Upload a lead list first</option>';
-  document.getElementById('campRosterId').innerHTML = rosters.map(r => `<option value="${r.id}">${r.name} (${r.template_count} variants)</option>`).join('') || '<option disabled>Create a message roster first</option>';
-}
-document.querySelector('button[onclick="openModal(\'modal-new-campaign\')"]')?.addEventListener('click', populateCampaignSelects);
-
-async function createCampaign() {
-  const payload = {
-    name: document.getElementById('campName').value.trim(),
-    list_id: document.getElementById('campListId').value,
-    roster_id: document.getElementById('campRosterId').value,
-    source: document.getElementById('campSource').value,
-    rotation_mode: document.getElementById('campRotation').value,
-    rate_per_sms: SMS_RATE_EUR,
-    throttle_ms: parseInt(document.getElementById('campThrottle').value) || 300
-  };
-  if (!payload.name || !payload.source) return toast('Name and Sender ID are required', true);
-  try {
-    await api('/api/campaigns', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-    toast('Campaign created');
-    closeModal('modal-new-campaign');
-    loadCampaigns();
-  } catch (e) { toast(e.message, true); }
-}
-
 async function openCampaignDetail(id) {
   currentCampaignId = id;
   const { campaign, segments, stats } = await api(`/api/campaigns/${id}/status`);
   document.getElementById('cdTitle').textContent = campaign.name;
-  const segInfo = segments?.length > 1
-    ? `<div class="hint" style="margin-bottom:8px;">${segments.length} client segments: ${segments.map(s => `${s.label || s.list_name} (${s.source})`).join(' · ')}</div>`
-    : '';
   document.getElementById('cdStats').innerHTML = `
     <div class="card stat-card"><div class="stat-label">Sent / Total</div><div class="stat-value">${stats.sent || 0} / ${stats.total || 0}</div></div>
     <div class="card stat-card"><div class="stat-label">Delivered</div><div class="stat-value accent">${stats.delivered || 0}</div></div>
@@ -696,10 +508,10 @@ async function openCampaignDetail(id) {
   if (campaign.status === 'draft') {
     try {
       const preview = await api(`/api/campaigns/${id}/preview`);
-      document.getElementById('cdPreviewWrap').innerHTML = segInfo + `
-        <div class="hint" style="margin-top:0;">Preview of first ${preview.preview.length} of ${preview.total_leads} leads · ${preview.template_count} message variants · ${preview.segment_count || 1} segment(s) · estimated cost ${fmtMoney(preview.estimated_cost)}</div>
-        <div class="table-wrap"><table><thead><tr><th>Phone</th><th>SID</th><th>Client</th><th>Message</th><th>Seg</th></tr></thead><tbody>
-          ${preview.preview.map(p => `<tr><td class="mono">${p.phone}</td><td class="mono">${escapeHtml(p.source||'')}</td><td>${escapeHtml(p.segment||'')}</td><td>${escapeHtml(p.text)}</td><td>${p.parts}</td></tr>`).join('')}
+      document.getElementById('cdPreviewWrap').innerHTML = `
+        <div class="hint" style="margin-top:0;">Preview of first ${preview.preview.length} of ${preview.total_leads} leads · ${preview.template_count} message variants · estimated cost ${fmtMoney(preview.estimated_cost)}</div>
+        <div class="table-wrap"><table><thead><tr><th>Phone</th><th>SID</th><th>Message</th><th>Seg</th></tr></thead><tbody>
+          ${preview.preview.map(p => `<tr><td class="mono">${p.phone}</td><td class="mono">${escapeHtml(p.source||'')}</td><td>${escapeHtml(p.text)}</td><td>${p.parts}</td></tr>`).join('')}
         </tbody></table></div>
       `;
     } catch (e) {
@@ -731,7 +543,7 @@ async function sendCampaign() {
   if (!confirm(`Send this campaign now?\n\n${modeNote}`)) return;
   try {
     const res = await api(`/api/campaigns/${currentCampaignId}/send`, { method: 'POST' });
-    toast(`Sending to ${res.lead_count} leads — check back in Reports for progress`);
+    toast(`Sending to ${res.lead_count} leads — check Traffic Report for delivery status`);
     closeModal('modal-campaign-detail');
     loadCampaigns();
     refreshBalancePill();
@@ -742,29 +554,94 @@ function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
-// ---------- REPORTS ----------
-async function loadReports() {
-  const summary = await api('/api/reports/summary');
-  const s = summary.stats;
-  document.getElementById('reportStats').innerHTML = [
-    { label: 'Total sends', value: s.total_sends || 0 },
-    { label: 'Delivered', value: s.delivered || 0, cls: 'accent' },
-    { label: 'Awaiting DLR', value: s.awaiting_dlr || 0, cls: 'warn' },
-    { label: 'Total spend', value: fmtMoney(s.total_spend) },
-  ].map(c => `<div class="card stat-card"><div class="stat-label">${c.label}</div><div class="stat-value ${c.cls||''}">${c.value}</div></div>`).join('');
+// ---------- TRAFFIC REPORT ----------
+let trafficPollTimer = null;
 
-  const campaigns = await api('/api/campaigns');
-  const tbody = document.querySelector('#reportTable tbody');
-  tbody.innerHTML = campaigns.length ? campaigns.map(c => `
-    <tr>
-      <td>${escapeHtml(c.name)}</td>
-      <td>${c.sent_count || 0}</td>
-      <td>${c.delivered_count || 0}</td>
-      <td>${c.failed_count || 0}</td>
-      <td class="mono">${fmtMoney(c.total_spend)}</td>
-      <td><button class="btn-secondary" onclick="window.open('/api/campaigns/${c.id}/export.csv','_blank')">CSV</button></td>
-    </tr>
-  `).join('') : `<tr><td colspan="6" class="empty-state">No sends yet — use Send SMS or Launch Campaign first.</td></tr>`;
+function todayIso() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function trafficStatusClass(status) {
+  const s = String(status || '').toLowerCase();
+  if (s === 'delivered') return 'ok';
+  if (s === 'sent') return 'warn';
+  if (s === 'failed' || s === 'rejected') return 'fail';
+  return 'neutral';
+}
+
+function truncateText(text, max = 48) {
+  const t = String(text || '');
+  return t.length > max ? t.slice(0, max) + '…' : t;
+}
+
+function stopTrafficPolling() {
+  if (trafficPollTimer) clearInterval(trafficPollTimer);
+  trafficPollTimer = null;
+}
+
+function startTrafficPolling() {
+  stopTrafficPolling();
+  if (!document.getElementById('trafficAutoRefresh')?.checked) return;
+  trafficPollTimer = setInterval(() => loadTrafficReport(true), 10000);
+}
+
+function onTrafficAutoRefreshChange() {
+  if (document.getElementById('trafficAutoRefresh')?.checked) startTrafficPolling();
+  else stopTrafficPolling();
+}
+
+async function loadTrafficPage() {
+  const from = document.getElementById('trafficDateFrom');
+  const to = document.getElementById('trafficDateTo');
+  if (from && !from.value) from.value = todayIso();
+  if (to && !to.value) to.value = todayIso();
+  await loadSenderIdOptions();
+  await loadTrafficReport();
+  onTrafficAutoRefreshChange();
+}
+
+async function loadTrafficReport(silent) {
+  const dateFrom = document.getElementById('trafficDateFrom').value;
+  const dateTo = document.getElementById('trafficDateTo').value;
+  if (!dateFrom || !dateTo) return toast('Select date range', true);
+
+  const params = new URLSearchParams({
+    date_from: dateFrom,
+    date_to: dateTo,
+    sender_id: document.getElementById('trafficSenderFilter').value,
+    address: document.getElementById('trafficAddress').value.trim(),
+    status: document.getElementById('trafficStatus').value
+  });
+
+  try {
+    const data = await api('/api/traffic?' + params.toString());
+    document.getElementById('trafficStats').innerHTML = [
+      { label: 'Total traffic', value: data.totalTraffic ?? 0 },
+      { label: 'Total parts', value: data.totalParts ?? 0 },
+      { label: 'Delivered', value: data.totalDelivered ?? 0, cls: 'accent' },
+      { label: 'Total cost', value: fmtEur(data.totalCost ?? 0) },
+    ].map(c => `<div class="card stat-card"><div class="stat-label">${c.label}</div><div class="stat-value ${c.cls||''}">${c.value}</div></div>`).join('');
+
+    const tbody = document.querySelector('#trafficTable tbody');
+    tbody.innerHTML = (data.data || []).length ? data.data.map(row => {
+      const name = [row.FirstName, row.LastName].filter(Boolean).join(' ') || '—';
+      return `<tr>
+        <td>${escapeHtml(name)}</td>
+        <td>${escapeHtml(row.DestinationCountry || '—')}</td>
+        <td>${escapeHtml(row.DestinationOperator || '—')}</td>
+        <td title="${escapeHtml(row.Text || '')}">${escapeHtml(truncateText(row.Text))}</td>
+        <td class="mono">${escapeHtml(row.DestinationAddress || '')}</td>
+        <td class="mono">${fmtEur(row.TotalRate ?? 0)}</td>
+        <td class="mono">${escapeHtml(row.OriginatingAddress || '')}</td>
+        <td><span class="badge ${trafficStatusClass(row.StringStatus)}">${escapeHtml(row.StringStatus || '—')}</span></td>
+        <td class="mono">${escapeHtml(row.ReceivedDate || '')}</td>
+      </tr>`;
+    }).join('') : `<tr><td colspan="9" class="empty-state">No traffic for this date range.</td></tr>`;
+
+    if (!silent) startTrafficPolling();
+  } catch (e) {
+    if (!silent) toast(e.message, true);
+  }
 }
 
 // ---------- SETTINGS ----------
@@ -774,7 +651,6 @@ async function loadSettings() {
   document.getElementById('setTestMode').checked = !!s.test_mode;
   updateTestModeUI(s.test_mode);
   defaultRatePerSms = s.default_rate_per_sms || SMS_RATE_EUR;
-  document.getElementById('dlrUrl').value = window.location.origin + '/api/dlr';
   refreshBalancePill();
 }
 async function saveSettings() {

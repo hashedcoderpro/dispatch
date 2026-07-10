@@ -22,6 +22,7 @@ const {
   requestSenderId,
   listSenderIds,
   deleteSenderIds,
+  readTraffic,
   getAccountBalance,
   parseStoredCookies,
   validateSenderId
@@ -1014,6 +1015,46 @@ function handleDlr(req, res) {
 }
 app.get('/api/dlr', handleDlr);
 app.post('/api/dlr', handleDlr);
+
+// ---------- traffic report (live from Otus portal) ----------
+app.get('/api/traffic', async (req, res) => {
+  const filters = {
+    dateFrom: String(req.query.date_from || '').trim(),
+    dateTo: String(req.query.date_to || '').trim(),
+    senderId: String(req.query.sender_id || '').trim(),
+    address: String(req.query.address || '').trim(),
+    status: String(req.query.status || '').trim()
+  };
+  if (!filters.dateFrom || !filters.dateTo) {
+    return res.status(400).json({ error: 'date_from and date_to required (YYYY-MM-DD)' });
+  }
+
+  try {
+    const result = await withPortalSession(async (cookies) => {
+      const out = await readTraffic(cookies, filters);
+      if (!out.ok && portalSessionExpired(out.status, out.error)) return { needsRefresh: true };
+      return out;
+    });
+    if (result.needsRefresh) {
+      return res.status(401).json({ error: 'Portal session expired — sign in again' });
+    }
+    if (!result.ok) {
+      return res.status(502).json({ error: result.error || 'Could not load traffic report' });
+    }
+    res.json({
+      data: result.data,
+      totalTraffic: result.totalTraffic,
+      totalParts: result.totalParts,
+      totalDelivered: result.totalDelivered,
+      totalCost: result.totalCost,
+      recordsTotal: result.recordsTotal,
+      rowsLimit: result.rowsLimit
+    });
+  } catch (e) {
+    console.error('Traffic fetch error:', e);
+    res.status(500).json({ error: e.message || 'Failed to load traffic' });
+  }
+});
 
 // ---------- reports ----------
 app.get('/api/reports/summary', async (req, res) => {

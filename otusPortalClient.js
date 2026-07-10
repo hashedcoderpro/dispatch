@@ -112,6 +112,39 @@ async function getAccountBalance(jar) {
   return { ok: true, ...parsed, raw: text.trim() };
 }
 
+async function readTraffic(jar, filters = {}) {
+  const params = new URLSearchParams({
+    DateFrom: filters.dateFrom || '',
+    DateTo: filters.dateTo || '',
+    CountryId: filters.countryId || '',
+    CampaignId: filters.campaignId || '',
+    OperatorId: filters.operatorId || '',
+    AccountId: filters.accountId || '',
+    Status: filters.status || '',
+    Address: filters.address || '',
+    SenderId: filters.senderId || ''
+  });
+
+  const { status, json, text } = await portalFetch(jar, '/Report/ReadTraffic', {
+    method: 'POST',
+    body: params.toString()
+  });
+
+  if (!json || !Array.isArray(json.data)) {
+    return { ok: false, status, error: text.slice(0, 200) || `Traffic fetch failed (${status})` };
+  }
+  return {
+    ok: true,
+    data: json.data,
+    totalTraffic: json.totalTraffic ?? json.data.length,
+    totalParts: json.totalParts ?? json.data.length,
+    totalDelivered: json.TotalDelivered ?? 0,
+    totalCost: json.totalCost ?? 0,
+    recordsTotal: json.recordsTotal ?? json.data.length,
+    rowsLimit: json.rowsLimit
+  };
+}
+
 async function deleteSenderIds(jar, senderIds) {
   const ids = senderIds.map(id => Number(id)).filter(n => n > 0);
   if (!ids.length) return { ok: false, error: 'No sender IDs to delete' };
@@ -185,6 +218,7 @@ module.exports = {
   requestSenderId,
   listSenderIds,
   deleteSenderIds,
+  readTraffic,
   getAccountBalance,
   parseBalanceText,
   parseStoredCookies

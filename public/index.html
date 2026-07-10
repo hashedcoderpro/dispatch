@@ -41,9 +41,7 @@
       <button class="nav-item" data-page="send"><span class="dot"></span>Send SMS</button>
       <button class="nav-item" data-page="sender-ids"><span class="dot"></span>Sender IDs</button>
       <button class="nav-item" data-page="campaigns"><span class="dot"></span>Launch Campaign</button>
-      <button class="nav-item" data-page="leads"><span class="dot"></span>Lead Lists</button>
-      <button class="nav-item" data-page="messages"><span class="dot"></span>Message Rosters</button>
-      <button class="nav-item" data-page="reports"><span class="dot"></span>Reports</button>
+      <button class="nav-item" data-page="reports"><span class="dot"></span>Traffic Report</button>
       <button class="nav-item" data-page="settings"><span class="dot"></span>Settings</button>
     </div>
     <div class="sidebar-footer">
@@ -139,11 +137,6 @@
         <thead><tr><th>Sender ID</th><th>Status</th><th>Otus ID</th><th></th></tr></thead>
         <tbody></tbody>
       </table></div>
-      <div class="section-title" style="margin-top:20px;">Requests via Dispatch</div>
-      <div class="table-wrap"><table id="localSidTable">
-        <thead><tr><th>Sender ID</th><th>Status</th><th>Requested</th><th>Note</th></tr></thead>
-        <tbody></tbody>
-      </table></div>
     </div>
 
     <!-- CAMPAIGNS / LAUNCH -->
@@ -151,28 +144,33 @@
       <div class="page-header">
         <div>
           <h1>Launch Campaign</h1>
-          <p>Upload lead lists per client/SID, share one message roster, and send with proportional interleaving.</p>
+          <p>One campaign — pick a sender ID, upload leads and message variants, then preview and send.</p>
         </div>
       </div>
 
       <div class="card" style="margin-bottom:20px;">
         <div class="section-title" style="margin-top:0;">Campaign setup</div>
         <label>Campaign name</label>
-        <input type="text" id="launchName" placeholder="e.g. July multi-client blast">
-        <label>Messages — paste below, upload a file, or pick a saved roster</label>
-        <textarea id="launchMessages" placeholder="Hi {name}, following up...&#10;Hey {name} — quick note..." style="min-height:100px;"></textarea>
-        <div class="field-row">
-          <div class="file-drop-wrap" id="launchMessageFileWrap">
-            <div class="file-drop" onclick="document.getElementById('launchMessageFile').click()">
-              <div id="launchMessageFileLabel">Upload message file (.txt/.csv)</div>
-              <input type="file" id="launchMessageFile" accept=".csv,.txt" onchange="onLaunchMessageFile(this)">
-            </div>
-            <button type="button" class="file-drop-close" title="Remove file" onclick="event.stopPropagation(); clearLaunchMessageFile()">×</button>
+        <input type="text" id="launchName" placeholder="e.g. July outreach">
+        <label>Sender ID (SID)</label>
+        <select id="launchSource"><option value="">— loading sender IDs —</option></select>
+        <label>Leads — paste numbers below or upload a file</label>
+        <textarea id="launchPhones" placeholder="34612345678&#10;34698765432" oninput="updateLaunchCount()"></textarea>
+        <div class="file-drop-wrap" id="launchLeadsFileWrap">
+          <div class="file-drop" onclick="document.getElementById('launchLeadsFile').click()">
+            <div id="launchLeadsFileLabel">Upload leads (.txt / .csv)</div>
+            <input type="file" id="launchLeadsFile" accept=".csv,.txt" onchange="onLaunchLeadsFile(this)">
           </div>
-          <div>
-            <label>Or use saved roster</label>
-            <select id="launchRosterId"><option value="">— create from above —</option></select>
+          <button type="button" class="file-drop-close" title="Remove file" onclick="event.stopPropagation(); clearLaunchLeadsFile()">×</button>
+        </div>
+        <label>Messages — one variant per line (rotated across leads)</label>
+        <textarea id="launchMessages" placeholder="Hi {name}, following up...&#10;Hey {name} — quick note..." style="min-height:100px;" oninput="updateLaunchCount()"></textarea>
+        <div class="file-drop-wrap" id="launchMessageFileWrap">
+          <div class="file-drop" onclick="document.getElementById('launchMessageFile').click()">
+            <div id="launchMessageFileLabel">Upload message file (.txt/.csv)</div>
+            <input type="file" id="launchMessageFile" accept=".csv,.txt" onchange="onLaunchMessageFile(this)">
           </div>
+          <button type="button" class="file-drop-close" title="Remove file" onclick="event.stopPropagation(); clearLaunchMessageFile()">×</button>
         </div>
         <div class="field-row">
           <div>
@@ -183,23 +181,14 @@
             </select>
           </div>
           <div>
-            <label>Cost per SMS segment</label>
-            <input type="text" id="launchRate" readonly value="€0.05">
-            <p class="hint" style="margin-top:-8px;">Fixed at €0.05 per segment. A 161-char GSM message = 2 segments.</p>
-          </div>
-          <div>
             <label>Throttle — delay between sends (ms)</label>
             <input type="number" id="launchThrottle" value="300">
-            <p class="hint" style="margin-top:-8px;">Pause between each SMS. 300ms ≈ 3/sec. Higher = slower but gentler on carriers/API.</p>
+            <p class="hint" style="margin-top:-8px;">Pause between each SMS. 300ms ≈ 3/sec.</p>
           </div>
         </div>
 
-        <div class="section-title">Client segments <button class="btn-secondary" style="margin-left:8px; padding:4px 10px; font-size:11px;" onclick="addLaunchSegment()">+ Add client</button></div>
-        <p class="hint" style="margin-top:0;">Each segment = one client with their own SID and lead list. Sends interleave proportionally (1k + 2k → A, B, B, A, B, B…).</p>
-        <div id="launchSegments"></div>
-
         <div class="flex-between" style="margin-top:8px;">
-          <span class="tag" id="launchCountTag">0 leads across 0 segments</span>
+          <span class="tag" id="launchCountTag">0 leads · 0 messages</span>
           <button class="btn-primary" onclick="launchCampaign()">Create campaign</button>
         </div>
       </div>
@@ -208,46 +197,61 @@
       <div id="campaignList"></div>
     </div>
 
-    <!-- LEADS -->
-    <div class="page" id="page-leads">
-      <div class="page-header">
-        <div>
-          <h1>Lead Lists</h1>
-          <p>Upload or paste contacts — .txt (one number per line) or .csv (with name columns).</p>
-        </div>
-        <button class="btn-primary" onclick="openModal('modal-upload-leads')">+ Upload list</button>
-      </div>
-      <div id="leadLists"></div>
-    </div>
-
-    <!-- MESSAGES -->
-    <div class="page" id="page-messages">
-      <div class="page-header">
-        <div>
-          <h1>Message Rosters</h1>
-          <p>A pool of 50–100 message variants that rotate across a send, so contacts don't all get identical text.</p>
-        </div>
-        <button class="btn-primary" onclick="openModal('modal-upload-roster')">+ New roster</button>
-      </div>
-      <div id="rosterLists"></div>
-    </div>
-
-    <!-- REPORTS -->
+    <!-- TRAFFIC REPORT -->
     <div class="page" id="page-reports">
       <div class="page-header">
-        <div><h1>Reports</h1><p>Deliverability across every campaign. Pick a campaign for message-level detail.</p></div>
+        <div><h1>Traffic Report</h1><p>Live SMS traffic from your Otus account — same data as the Otus portal.</p></div>
       </div>
-      <div class="grid cols-4" id="reportStats"></div>
-      <div class="section-title">Campaigns</div>
-      <div class="table-wrap"><table id="reportTable">
-        <thead><tr><th>Campaign</th><th>Sent</th><th>Delivered</th><th>Failed</th><th>Spend</th><th></th></tr></thead>
+      <p class="hint" style="margin-top:-8px;">Advanced multi-account filters will move to an admin panel later.</p>
+      <div class="card" style="margin-bottom:16px;">
+        <div class="field-row">
+          <div>
+            <label>Date from</label>
+            <input type="date" id="trafficDateFrom">
+          </div>
+          <div>
+            <label>Date to</label>
+            <input type="date" id="trafficDateTo">
+          </div>
+          <div>
+            <label>Sender ID</label>
+            <select id="trafficSenderFilter"><option value="">All</option></select>
+          </div>
+          <div>
+            <label>Destination</label>
+            <input type="text" id="trafficAddress" placeholder="Phone number">
+          </div>
+          <div>
+            <label>Status</label>
+            <select id="trafficStatus">
+              <option value="">All</option>
+              <option value="Delivered">Delivered</option>
+              <option value="Sent">Sent</option>
+              <option value="Failed">Failed</option>
+              <option value="Rejected">Rejected</option>
+            </select>
+          </div>
+        </div>
+        <div class="flex-between" style="margin-top:8px;">
+          <label style="display:flex; align-items:center; gap:8px; margin:0;">
+            <input type="checkbox" id="trafficAutoRefresh" style="width:auto; margin:0;" onchange="onTrafficAutoRefreshChange()"> Auto refresh (10s)
+          </label>
+          <button class="btn-primary" onclick="loadTrafficReport()">Refresh</button>
+        </div>
+      </div>
+      <div class="grid cols-4" id="trafficStats"></div>
+      <div class="table-wrap"><table id="trafficTable">
+        <thead><tr>
+          <th>Name</th><th>Country</th><th>Operator</th><th>Text</th><th>Destination</th>
+          <th>Cost</th><th>Sender ID</th><th>Status</th><th>Created</th>
+        </tr></thead>
         <tbody></tbody>
       </table></div>
     </div>
 
     <!-- SETTINGS -->
     <div class="page" id="page-settings">
-      <div class="page-header"><div><h1>Settings</h1><p>Test mode and webhooks.</p></div></div>
+      <div class="page-header"><div><h1>Settings</h1><p>Test mode and account.</p></div></div>
 
       <div class="card" style="max-width:480px;">
         <div class="section-title" style="margin-top:0;">Account</div>
@@ -272,90 +276,8 @@
           <div class="stat-value accent" id="settingsBalance" style="font-size:24px;">€0.00</div>
         </div>
       </div>
-
-      <div class="card" style="max-width:480px; margin-top:16px;">
-        <div class="section-title" style="margin-top:0;">DLR webhook</div>
-        <p class="hint" style="margin-top:0;">Give this URL to Otus as your DLR push endpoint (needs to be publicly reachable — see README for a tunnel option during testing):</p>
-        <input type="text" class="mono" readonly id="dlrUrl" onclick="this.select()">
-      </div>
     </div>
 
-  </div>
-</div>
-
-<!-- MODAL: upload leads -->
-<div class="modal-overlay" id="modal-upload-leads" style="display:none;">
-  <div class="modal">
-    <h2>Upload lead list</h2>
-    <label>List name</label>
-    <input type="text" id="leadListName" placeholder="e.g. July prospects batch 1">
-    <label>Numbers (one per line)</label>
-    <textarea id="leadNumbersText" style="min-height:120px;" placeholder="34612345678&#10;34698765432&#10;15551234567"></textarea>
-    <p class="hint" style="margin-top:-6px;">Or upload a file below — .txt (one number per line) or .csv (with phone/name columns).</p>
-    <div class="file-drop" onclick="document.getElementById('leadFileInput').click()">
-      <div id="leadFileLabel">Click to upload .txt or .csv</div>
-      <input type="file" id="leadFileInput" accept=".csv,.txt" onchange="document.getElementById('leadFileLabel').textContent=this.files[0]?.name || 'Click to upload .txt or .csv'">
-    </div>
-    <p class="hint">CSV: phone/mobile column required; optional name, custom1, custom2. Text file: one number per line.</p>
-    <div class="flex-between">
-      <button class="btn-secondary" onclick="closeModal('modal-upload-leads')">Cancel</button>
-      <button class="btn-primary" onclick="uploadLeads()">Upload</button>
-    </div>
-  </div>
-</div>
-
-<!-- MODAL: upload roster -->
-<div class="modal-overlay" id="modal-upload-roster" style="display:none;">
-  <div class="modal">
-    <h2>New message roster</h2>
-    <label>Roster name</label>
-    <input type="text" id="rosterName" placeholder="e.g. Q3 outreach variants">
-    <label>Messages (one per line, 50–100 recommended)</label>
-    <textarea id="rosterTextarea" style="min-height:160px;" placeholder="Hi {name}, following up on your account {phone}...&#10;Hey {name} — quick note about your account...&#10;..."></textarea>
-    <p class="hint">Use {name}, {phone}, {custom1}, {custom2} — filled in per contact. Or click below to upload a .txt/.csv instead.</p>
-    <div class="file-drop" onclick="document.getElementById('rosterFileInput').click()">
-      <div id="rosterFileLabel">Or click to upload a .txt/.csv (one message per line)</div>
-      <input type="file" id="rosterFileInput" accept=".csv,.txt" onchange="document.getElementById('rosterFileLabel').textContent=this.files[0]?.name || 'Or click to upload a .txt/.csv'">
-    </div>
-    <div class="flex-between">
-      <button class="btn-secondary" onclick="closeModal('modal-upload-roster')">Cancel</button>
-      <button class="btn-primary" onclick="createRoster()">Save roster</button>
-    </div>
-  </div>
-</div>
-
-<!-- MODAL: new campaign -->
-<div class="modal-overlay" id="modal-new-campaign" style="display:none;">
-  <div class="modal">
-    <h2>New campaign</h2>
-    <label>Campaign name</label>
-    <input type="text" id="campName" placeholder="e.g. July prospects — outreach v1">
-    <label>Lead list</label>
-    <select id="campListId"></select>
-    <label>Message roster</label>
-    <select id="campRosterId"></select>
-    <label>Sender ID (source)</label>
-    <select id="campSource"><option value="">— loading sender IDs —</option></select>
-    <div class="field-row">
-      <div>
-        <label>Rotation</label>
-        <select id="campRotation">
-          <option value="sequential">Sequential (round-robin)</option>
-          <option value="random">Random</option>
-        </select>
-      </div>
-      <div>
-        <label>Rate per SMS segment</label>
-        <input type="text" readonly value="€0.05">
-      </div>
-    </div>
-    <label>Throttle between sends (ms)</label>
-    <input type="number" id="campThrottle" value="300">
-    <p class="hint">Higher throttle = slower but gentler on the API / less likely to trip carrier spam filters.</p>
-    <div class="flex-between">
-      <button class="btn-secondary" onclick="closeModal('modal-new-campaign')">Cancel</button>
-      <button class="btn-primary" onclick="createCampaign()">Create campaign</button>
-    </div>
   </div>
 </div>
 
