@@ -331,8 +331,10 @@ function htmlSelectedOption(html, selectId) {
 }
 
 function htmlCheckboxChecked(html, id) {
-  const re = new RegExp(`id="${id}"[^>]*checked`, 'i');
-  return re.test(html);
+  const re = new RegExp(`<input\\b[^>]*\\bid="${id}"[^>]*>`, 'i');
+  const m = html.match(re);
+  if (!m) return false;
+  return /\bchecked\b/i.test(m[0]);
 }
 
 function parseEditAccountHtml(html) {
@@ -418,6 +420,18 @@ async function changeAccountRoute(jar, accountId, routeIndex) {
   if (!vendorId) return { ok: false, error: `Invalid route index: ${routeIndex}` };
   const form = await getEditAccountForm(jar, accountId);
   if (!form.ok) return form;
+
+  // Authoritative booleans from Accounts/Read JSON — HTML checkbox order varies (checked before id).
+  const listed = await listAdminAccounts(jar);
+  if (listed.ok) {
+    const acct = listed.accounts.find(a => Number(a.AccountId) === Number(accountId));
+    if (acct) {
+      form.fields.isActive = !!acct.Active;
+      form.fields.completedFirstPayment = !!acct.CompletedFirstPayment;
+      form.fields.emailVerified = !!acct.EmailVerified;
+    }
+  }
+
   form.fields.vendorId = vendorId;
   return editAccountUser(jar, form.fields);
 }

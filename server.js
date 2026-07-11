@@ -51,7 +51,8 @@ const {
 const SMS_RATE_EUR = 0.05;
 
 const app = express();
-if (process.env.TRUST_PROXY === '1') app.set('trust proxy', 1);
+// Cloudflare (orange cloud) + Caddy = two proxy hops; trust all so rate limits use real client IP.
+if (process.env.TRUST_PROXY === '1') app.set('trust proxy', true);
 app.use(helmet({
   contentSecurityPolicy: false,
   crossOriginEmbedderPolicy: false

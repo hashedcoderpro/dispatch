@@ -87,6 +87,12 @@ if [[ -n "$DOMAIN" ]]; then
   apt-get install -y -qq caddy
 
   cat > /etc/caddy/Caddyfile <<EOF
+{
+  servers {
+    trusted_proxies cloudflare
+  }
+}
+
 ${DOMAIN} {
   reverse_proxy 127.0.0.1:${PORT}
 }
