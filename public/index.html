@@ -10,18 +10,16 @@
 
 <div id="loginScreen" class="login-screen">
   <div class="login-card">
-    <div class="brand-mark" style="margin-bottom:6px;">
+    <div class="brand-mark" style="margin-bottom:20px;">
       <span class="bars"><span></span><span></span><span></span><span></span></span>
       Dispatch
     </div>
-    <p class="login-sub">Dispatch SMS Console</p>
-    <p class="hint" style="margin-top:0;">Sign in with your Otus portal credentials. All three are required — the API token is used for sending SMS; username and password establish your portal session for sender ID management.</p>
     <label>Username</label>
-    <input type="text" id="loginUsername" placeholder="e.g. ClientOtus" autocomplete="username">
-    <label>Portal password</label>
-    <input type="password" id="loginPassword" placeholder="Your otusprivategw.com password" autocomplete="current-password">
+    <input type="text" id="loginUsername" autocomplete="username">
+    <label>Password</label>
+    <input type="password" id="loginPassword" autocomplete="current-password">
     <label>API token</label>
-    <input type="password" id="loginApiToken" placeholder="From Otus → API integration" autocomplete="off">
+    <input type="password" id="loginApiToken" autocomplete="off">
     <p id="loginError" class="login-error" style="display:none;"></p>
     <button class="btn-primary login-btn" id="loginBtn" onclick="doLogin()">Sign in</button>
   </div>
@@ -42,10 +40,9 @@
       <button class="nav-item" data-page="sender-ids"><span class="dot"></span>Sender IDs</button>
       <button class="nav-item" data-page="campaigns"><span class="dot"></span>Launch Campaign</button>
       <button class="nav-item" data-page="reports"><span class="dot"></span>Traffic Report</button>
-      <button class="nav-item" data-page="settings"><span class="dot"></span>Settings</button>
+      <button class="nav-item nav-signout" type="button" onclick="doLogout()"><span class="dot"></span>Sign out</button>
     </div>
     <div class="sidebar-footer">
-      <div id="sidebarMode" class="mode-pill mode-test" style="display:none;">TEST MODE</div>
       <div class="balance-pill">
         <div>
           <div class="label">Balance</div>
@@ -56,20 +53,16 @@
   </div>
 
   <div class="main">
-    <div id="testModeBanner" class="test-mode-banner" style="display:none;">
-      <strong>Test mode is on</strong> — SMS are simulated locally and never sent to Otus. Uncheck Test mode in Settings, click Save, then send again.
-    </div>
-
     <!-- DASHBOARD -->
     <div class="page active" id="page-dashboard">
       <div class="page-header">
         <div>
           <h1>Dashboard</h1>
-          <p>Account overview and delivery performance across all campaigns.</p>
+          <p id="dashDayLabel">Today (CET)</p>
         </div>
       </div>
       <div class="grid cols-4" id="dashStats"></div>
-      <div class="section-title">Error breakdown <span class="muted" style="font-weight:400;font-size:12px;">(failed API sends, last 7 days)</span></div>
+      <div class="section-title">Error breakdown <span class="muted" style="font-weight:400;font-size:12px;" id="dashErrorDayLabel">(today, CET)</span></div>
       <div class="table-wrap"><table id="errorTable"><thead><tr><th>Code</th><th>Meaning</th><th>Count</th></tr></thead><tbody></tbody></table></div>
     </div>
 
@@ -199,7 +192,7 @@
         </div>
       </div>
 
-      <div class="section-title">Past campaigns</div>
+      <div class="section-title" id="campaignHistoryTitle">Today's campaigns</div>
       <div id="campaignList"></div>
     </div>
 
@@ -253,35 +246,6 @@
         </tr></thead>
         <tbody></tbody>
       </table></div>
-    </div>
-
-    <!-- SETTINGS -->
-    <div class="page" id="page-settings">
-      <div class="page-header"><div><h1>Settings</h1><p>Test mode and account.</p></div></div>
-
-      <div class="card" style="max-width:480px;">
-        <div class="section-title" style="margin-top:0;">Account</div>
-        <p class="hint" style="margin-top:0;">Signed in as <strong id="setSignedInUser">—</strong></p>
-        <button class="btn-secondary" onclick="doLogout()">Sign out</button>
-      </div>
-
-      <div class="card" style="max-width:480px; margin-top:16px;">
-        <div class="section-title" style="margin-top:0;">Sending mode</div>
-        <label style="display:flex; align-items:center; gap:8px; margin-bottom:14px;">
-          <input type="checkbox" id="setTestMode" style="width:auto; margin:0;"> Test mode (simulate sends, no real SMS or cost)
-        </label>
-        <p class="hint" style="margin-top:0;">Turn off test mode when you're ready to send real SMS through Otus.</p>
-        <button class="btn-primary" onclick="saveSettings()">Save settings</button>
-      </div>
-
-      <div class="card" style="max-width:480px; margin-top:16px;">
-        <div class="section-title" style="margin-top:0;">Billing</div>
-        <p class="hint" style="margin-top:0;">Account balance is fetched live from your Otus account (EUR). SMS cost is <strong>€0.05 per segment</strong>.</p>
-        <div style="margin-top:10px;">
-          <div class="label" style="font-size:11px; color:var(--muted);">Current balance</div>
-          <div class="stat-value accent" id="settingsBalance" style="font-size:24px;">€0.00</div>
-        </div>
-      </div>
     </div>
 
   </div>

@@ -87,6 +87,14 @@ async function doLogin() {
   }
 }
 
+async function doLogout() {
+  try {
+    await api('/api/admin/auth/logout', { method: 'POST' });
+  } catch (e) { /* ignore */ }
+  stopBalancePolling();
+  showLogin();
+}
+
 document.getElementById('loginPassword').addEventListener('keydown', e => {
   if (e.key === 'Enter') doLogin();
 });
@@ -98,8 +106,14 @@ function escapeHtml(s) {
 
 let balancePollTimer = null;
 let allAccounts = [];
+let allAdminSenderIds = [];
 let balanceAccountId = null;
 let routeAccountId = null;
+
+function stopBalancePolling() {
+  if (balancePollTimer) clearInterval(balancePollTimer);
+  balancePollTimer = null;
+}
 
 function startBalancePolling() {
   if (balancePollTimer) clearInterval(balancePollTimer);
@@ -256,20 +270,33 @@ async function saveTemplates() {
 async function loadAdminSenderIds() {
   try {
     const { items } = await api('/api/admin/sender-ids');
-    const tbody = document.querySelector('#adminSidTable tbody');
-    const pending = (items || []).filter(s => Number(s.Active) === 2);
-    tbody.innerHTML = (items || []).length
-      ? items.slice(0, 200).map(s => `
-        <tr>
-          <td class="mono">${escapeHtml(s.Sender)}</td>
-          <td>${escapeHtml(s.Name || s.CompanyName || '—')}</td>
-          <td><span class="badge ${Number(s.Active) === 1 ? 'ok' : (Number(s.Active) === 2 ? 'warn' : 'fail')}">${escapeHtml(s.ActiveStr || s.Active)}</span></td>
-          <td class="mono">${escapeHtml(String(s.CreatedDate || '').slice(0, 19))}</td>
-        </tr>
-      `).join('') + (pending.length ? '' : '')
-      : '<tr><td colspan="4" class="empty-state">No sender IDs</td></tr>';
-    if (pending.length) toast(`${pending.length} pending SID(s) — auto-approve will process them`, false);
+    allAdminSenderIds = items || [];
+    filterAdminSenderIds();
   } catch (e) { toast(e.message, true); }
+}
+
+function filterAdminSenderIds() {
+  const q = document.getElementById('sidSearch')?.value.trim().toLowerCase() || '';
+  const rows = q
+    ? allAdminSenderIds.filter(s =>
+      String(s.Sender || '').toLowerCase().includes(q) ||
+      String(s.Name || s.CompanyName || '').toLowerCase().includes(q) ||
+      String(s.ActiveStr || s.Active || '').toLowerCase().includes(q)
+    )
+    : allAdminSenderIds;
+  const tbody = document.querySelector('#adminSidTable tbody');
+  const pending = rows.filter(s => Number(s.Active) === 2);
+  tbody.innerHTML = rows.length
+    ? rows.slice(0, 200).map(s => `
+      <tr>
+        <td class="mono">${escapeHtml(s.Sender)}</td>
+        <td>${escapeHtml(s.Name || s.CompanyName || '—')}</td>
+        <td><span class="badge ${Number(s.Active) === 1 ? 'ok' : (Number(s.Active) === 2 ? 'warn' : 'fail')}">${escapeHtml(s.ActiveStr || s.Active)}</span></td>
+        <td class="mono">${escapeHtml(String(s.CreatedDate || '').slice(0, 19))}</td>
+      </tr>
+    `).join('')
+    : '<tr><td colspan="4" class="empty-state">No sender IDs found</td></tr>';
+  if (pending.length) toast(`${pending.length} pending SID(s) — auto-approve will process them`, false);
 }
 
 async function initApp() {

@@ -47,6 +47,7 @@
           <div class="amount" id="sidebarBalance">€0.00</div>
         </div>
       </div>
+      <button class="btn-secondary nav-signout-btn" type="button" onclick="doLogout()">Sign out</button>
     </div>
   </div>
 
@@ -124,6 +125,10 @@
           <p>All sender IDs across accounts — pending items are auto-approved when enabled.</p>
         </div>
         <button class="btn-secondary" onclick="loadAdminSenderIds()">Refresh</button>
+      </div>
+      <div class="card" style="margin-bottom:16px;">
+        <label>Search sender IDs</label>
+        <input type="text" id="sidSearch" placeholder="Sender, account, or status" oninput="filterAdminSenderIds()">
       </div>
       <div class="table-wrap"><table id="adminSidTable">
         <thead><tr><th>Sender</th><th>Account</th><th>Status</th><th>Created</th></tr></thead>

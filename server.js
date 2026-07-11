@@ -49,6 +49,41 @@ const {
 } = require('./otusPortalClient');
 
 const SMS_RATE_EUR = 0.05;
+const CET_TZ = 'Europe/Paris';
+
+function formatParisLocal(ms) {
+  return new Intl.DateTimeFormat('sv-SE', {
+    timeZone: CET_TZ,
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+    hour12: false
+  }).format(new Date(ms));
+}
+
+function cetTodayYmd(date = new Date()) {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: CET_TZ }).format(date);
+}
+
+function utcMsForParisLocal(ymd, h, mi, s) {
+  const target = `${ymd} ${String(h).padStart(2, '0')}:${String(mi).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+  const [y, mo, d] = ymd.split('-').map(Number);
+  const guess = Date.UTC(y, mo - 1, d, 12, 0, 0);
+  for (let ms = guess - 14 * 3600000; ms <= guess + 14 * 3600000; ms += 1000) {
+    if (formatParisLocal(ms) === target) return ms;
+  }
+  return guess;
+}
+
+function cetDaySqlRange(date = new Date()) {
+  const today = cetTodayYmd(date);
+  const tomorrow = cetTodayYmd(new Date(date.getTime() + 86400000));
+  const toSql = ms => new Date(ms).toISOString().slice(0, 19).replace('T', ' ');
+  return {
+    start: toSql(utcMsForParisLocal(today, 0, 0, 0)),
+    end: toSql(utcMsForParisLocal(tomorrow, 0, 0, 0)),
+    label: today
+  };
+}
 
 const app = express();
 // Cloudflare (orange cloud) + Caddy = two proxy hops; trust all so rate limits use real client IP.
@@ -423,7 +458,7 @@ async function processSendQueue({ username, queue, campaignId, ratePerSms, throt
   const creds = getUserCredentials(username);
   if (!creds) throw new Error('User credentials not found');
   const apiId = creds.apiId;
-  const testMode = creds.testMode;
+  const testMode = false;
 
   const insertSend = db.prepare(`
     INSERT INTO sends (campaign_id, lead_id, template_id, phone, message_text, data_coding,
@@ -514,7 +549,7 @@ app.post('/api/auth/login', userLoginLimiter, async (req, res) => {
     password,
     apiId,
     portalCookies: portal.cookies,
-    testMode: existing ? existing.testMode : true
+    testMode: false
   });
   setSetting('vacotel_base_url', VACOTEL_GATEWAY_URL);
   setSessionCookie(res, username);
@@ -1088,6 +1123,7 @@ app.delete('/api/rosters/:id', (req, res) => {
 
 // ---------- campaigns ----------
 app.get('/api/campaigns', (req, res) => {
+  const { start, end, label } = cetDaySqlRange();
   const campaigns = db.prepare(`
     SELECT c.*, ll.name as list_name, mr.name as roster_name,
       COALESCE(
@@ -1102,9 +1138,10 @@ app.get('/api/campaigns', (req, res) => {
     FROM campaigns c
     JOIN lead_lists ll ON ll.id = c.list_id
     LEFT JOIN message_rosters mr ON mr.id = c.roster_id AND c.roster_id > 0
+    WHERE c.created_at >= ? AND c.created_at < ?
     ORDER BY c.id DESC
-  `).all();
-  res.json(campaigns);
+  `).all(start, end);
+  res.json({ day: label, timezone: CET_TZ, campaigns });
 });
 
 app.post('/api/campaigns', (req, res) => {
@@ -1408,6 +1445,7 @@ app.get('/api/traffic', async (req, res) => {
 
 // ---------- reports ----------
 app.get('/api/reports/summary', async (req, res) => {
+  const { start, end, label } = cetDaySqlRange();
   const stats = db.prepare(`
     SELECT
       COUNT(*) as total_sends,
@@ -1418,22 +1456,19 @@ app.get('/api/reports/summary', async (req, res) => {
       SUM(CASE WHEN dlr_status IS NULL AND send_status = 'sent' THEN 1 ELSE 0 END) as awaiting_dlr,
       SUM(cost) as total_spend
     FROM sends
-  `).get();
+    WHERE sent_at >= ? AND sent_at < ?
+  `).get(start, end);
   const byErrorCode = db.prepare(`
     SELECT send_error_code, COUNT(*) as count FROM sends
-    WHERE send_status = 'failed' AND sent_at >= datetime('now', '-7 days')
+    WHERE send_status = 'failed' AND sent_at >= ? AND sent_at < ?
     GROUP BY send_error_code
-  `).all().map(r => ({ ...r, description: ERROR_CODES[String(r.send_error_code)] || 'Unknown' }));
-  const legacyFailed = db.prepare(`
-    SELECT COUNT(*) as count FROM sends
-    WHERE send_status = 'failed' AND (sent_at IS NULL OR sent_at < datetime('now', '-7 days'))
-  `).get().count;
+  `).all(start, end).map(r => ({ ...r, description: ERROR_CODES[String(r.send_error_code)] || 'Unknown' }));
   let balance = null;
   try {
     const bal = await fetchOtusBalance(req.sessionUsername);
     if (bal.ok) balance = bal.balance;
   } catch (e) { /* dashboard still works without balance */ }
-  res.json({ stats, byErrorCode, legacyFailed, balance });
+  res.json({ stats, byErrorCode, balance, day: label, timezone: CET_TZ });
 });
 
 app.get('/api/campaigns/:id/export.csv', (req, res) => {

@@ -7,7 +7,7 @@ function showPage(name) {
   document.querySelectorAll('.nav-item').forEach(b => b.classList.remove('active'));
   document.getElementById('page-' + name).classList.add('active');
   document.querySelector(`.nav-item[data-page="${name}"]`).classList.add('active');
-  const loaders = { dashboard: loadDashboard, send: loadSendPage, 'sender-ids': loadSenderIds, campaigns: loadCampaigns, reports: loadTrafficPage, settings: loadSettings };
+  const loaders = { dashboard: loadDashboard, send: loadSendPage, 'sender-ids': loadSenderIds, campaigns: loadCampaigns, reports: loadTrafficPage };
   loaders[name] && loaders[name]();
 }
 
@@ -80,8 +80,6 @@ function showLogin(prefillUsername) {
 function showApp(username) {
   document.getElementById('loginScreen').style.display = 'none';
   document.getElementById('appShell').style.display = 'flex';
-  const signedIn = document.getElementById('setSignedInUser');
-  if (signedIn && username) signedIn.textContent = username;
 }
 
 async function doLogin() {
@@ -107,7 +105,6 @@ async function doLogin() {
     document.getElementById('loginPassword').value = '';
     document.getElementById('loginApiToken').value = '';
     showApp(r.username);
-    await refreshTestModeUI();
     await loadSenderIdOptions();
     startBalancePolling();
     loadDashboard();
@@ -166,8 +163,6 @@ async function refreshBalancePill() {
     const { balance } = await api('/api/balance');
     const text = fmtEur(balance);
     document.getElementById('sidebarBalance').textContent = text;
-    const settingsBal = document.getElementById('settingsBalance');
-    if (settingsBal) settingsBal.textContent = text;
   } catch (e) {}
 }
 
@@ -212,7 +207,13 @@ async function loadSenderIdOptions() {
 // ---------- DASHBOARD ----------
 async function loadDashboard() {
   const data = await api('/api/reports/summary');
-  const s = data.stats;
+  const s = data.stats || {};
+  const dayLabel = data.day ? `${data.day} (CET)` : 'Today (CET)';
+  const dashDay = document.getElementById('dashDayLabel');
+  const errDay = document.getElementById('dashErrorDayLabel');
+  if (dashDay) dashDay.textContent = dayLabel;
+  if (errDay) errDay.textContent = `(${data.day || 'today'}, CET)`;
+
   const cards = [
     { label: 'Balance', value: data.balance != null ? fmtEur(data.balance) : '—', cls: 'accent' },
     { label: 'Total sends', value: s.total_sends || 0, cls: '' },
@@ -224,20 +225,15 @@ async function loadDashboard() {
   `).join('');
 
   const tbody = document.querySelector('#errorTable tbody');
-  if (data.legacyFailed > 0 && !data.byErrorCode.length) {
-    tbody.innerHTML = `<tr><td colspan="3" class="empty-state">No failed sends in the last 7 days. (${data.legacyFailed} older failure${data.legacyFailed !== 1 ? 's' : ''} from before — not shown.)</td></tr>`;
-  } else {
-    tbody.innerHTML = data.byErrorCode.length
-      ? data.byErrorCode.map(r => `<tr><td class="mono">${r.send_error_code}</td><td>${r.description}</td><td>${r.count}</td></tr>`).join('')
-      : `<tr><td colspan="3" class="empty-state">No failed sends in the last 7 days.</td></tr>`;
-  }
+  tbody.innerHTML = data.byErrorCode.length
+    ? data.byErrorCode.map(r => `<tr><td class="mono">${r.send_error_code}</td><td>${r.description}</td><td>${r.count}</td></tr>`).join('')
+    : `<tr><td colspan="3" class="empty-state">No failed sends today.</td></tr>`;
 
   refreshBalancePill();
 }
 
 // ---------- SEND SMS (quick) ----------
 let defaultRatePerSms = SMS_RATE_EUR;
-let appTestMode = true;
 
 async function loadTestTemplates() {
   try {
@@ -267,26 +263,6 @@ async function loadCampaignTemplates() {
   } catch (e) {
     return campaignTemplates;
   }
-}
-
-function updateTestModeUI(testMode) {
-  appTestMode = !!testMode;
-  const banner = document.getElementById('testModeBanner');
-  const pill = document.getElementById('sidebarMode');
-  if (banner) banner.style.display = appTestMode ? 'block' : 'none';
-  if (pill) {
-    pill.style.display = 'block';
-    pill.textContent = appTestMode ? 'TEST MODE' : 'LIVE';
-    pill.className = 'mode-pill ' + (appTestMode ? 'mode-test' : 'mode-live');
-  }
-}
-
-async function refreshTestModeUI() {
-  try {
-    const s = await api('/api/settings');
-    updateTestModeUI(s.test_mode);
-    return s;
-  } catch (e) { return null; }
 }
 
 function countLines(text) {
@@ -418,8 +394,7 @@ async function launchCampaign() {
 
 async function loadSendPage() {
   try {
-    const s = await refreshTestModeUI() || await api('/api/settings');
-    defaultRatePerSms = s.default_rate_per_sms || SMS_RATE_EUR;
+    defaultRatePerSms = SMS_RATE_EUR;
     await loadSenderIdOptions();
     await loadTestTemplates();
     updateQuickSendCount();
@@ -446,7 +421,6 @@ async function previewQuickSend() {
 }
 
 async function sendQuickSms() {
-  const s = await refreshTestModeUI();
   const seg = document.getElementById('qsSegment').value;
   await loadTestTemplates();
   if (!(testTemplates[seg] || []).length) {
@@ -466,7 +440,7 @@ async function sendQuickSms() {
 
   const confirmed = await confirmSendModal({
     title: 'Send test SMS?',
-    testMode: !!s?.test_mode,
+    showMode: false,
     stats: [
       { label: 'Segment', value: seg.toUpperCase() },
       { label: 'Total SMS', value: String(preview.total_sms) },
@@ -554,10 +528,15 @@ async function loadCampaigns() {
   await loadCampaignTemplates();
   updateLaunchCount();
 
-  const campaigns = await api('/api/campaigns');
+  const resp = await api('/api/campaigns');
+  const campaigns = resp.campaigns || resp;
+  const dayLabel = resp.day ? `${resp.day} (CET)` : 'Today (CET)';
+  const titleEl = document.getElementById('campaignHistoryTitle');
+  if (titleEl) titleEl.textContent = `Today's campaigns — ${dayLabel}`;
+
   const host = document.getElementById('campaignList');
   if (!campaigns.length) {
-    host.innerHTML = `<div class="empty-state"><div class="big">🚀</div>No campaigns yet. Set up a campaign above.</div>`;
+    host.innerHTML = `<div class="empty-state"><div class="big">🚀</div>No campaigns today.</div>`;
     return;
   }
   host.innerHTML = campaigns.map(c => {
@@ -618,7 +597,6 @@ async function openCampaignDetail(id) {
 }
 
 async function sendCampaign() {
-  const s = await refreshTestModeUI();
   let preview;
   try {
     preview = await api(`/api/campaigns/${currentCampaignId}/preview`);
@@ -632,7 +610,7 @@ async function sendCampaign() {
 
   const confirmed = await confirmSendModal({
     title: 'Send campaign?',
-    testMode: !!s?.test_mode,
+    showMode: false,
     stats: [
       { label: 'Leads', value: String(preview.total_leads) },
       { label: 'Message variants', value: String(preview.template_count) },
@@ -745,31 +723,12 @@ async function loadTrafficReport(silent) {
   }
 }
 
-// ---------- SETTINGS ----------
-async function loadSettings() {
-  const s = await api('/api/settings');
-  document.getElementById('setSignedInUser').textContent = s.vacotel_username || '—';
-  document.getElementById('setTestMode').checked = !!s.test_mode;
-  updateTestModeUI(s.test_mode);
-  defaultRatePerSms = s.default_rate_per_sms || SMS_RATE_EUR;
-  refreshBalancePill();
-}
-async function saveSettings() {
-  const payload = {
-    test_mode: document.getElementById('setTestMode').checked
-  };
-  await api('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-  toast(payload.test_mode ? 'Saved — TEST mode (no real SMS to Otus)' : 'Saved — LIVE mode (real SMS enabled)');
-  loadSettings();
-}
-
 // ---------- init ----------
 async function initApp() {
   try {
     const status = await api('/api/auth/status');
     if (status.authenticated) {
       showApp(status.username);
-      await refreshTestModeUI();
       await loadSenderIdOptions();
       startBalancePolling();
       loadDashboard();

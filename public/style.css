@@ -72,8 +72,11 @@ body {
 .nav-item:hover { background: var(--panel-raised); color: var(--text); }
 .nav-item.active { background: var(--accent-dim); color: var(--accent); }
 .nav-item .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; opacity: 0.6; }
+.nav-item.nav-signout { margin-top: 4px; color: var(--muted); }
+.nav-item.nav-signout:hover { color: var(--text); }
+.nav-signout-btn { width: 100%; margin-top: 12px; }
 
-.sidebar-footer { margin-top: auto; padding: 16px 20px 0; border-top: 1px solid var(--border); }
+.sidebar-footer { margin-top: auto; padding: 16px 20px 16px; border-top: 1px solid var(--border); }
 .balance-pill {
   display: flex; justify-content: space-between; align-items: baseline;
   font-family: 'JetBrains Mono', monospace;
