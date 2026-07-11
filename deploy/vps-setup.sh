@@ -69,7 +69,7 @@ if [[ ! -f "$APP_DIR/.env" ]]; then
   chmod 600 "$APP_DIR/.env"
   echo ""
   echo "    Created $APP_DIR/.env from template — EDIT IT before using in production:"
-  echo "      CREDENTIALS_KEY, ADMIN_USERNAME, ADMIN_PASSWORD, TRUST_PROXY=1"
+  echo "      CREDENTIALS_KEY, ADMIN_USERNAME, ADMIN_PASSWORD, TRUST_PROXY=1, TRUST_PROXY_HOPS=2"
   echo ""
 fi
 

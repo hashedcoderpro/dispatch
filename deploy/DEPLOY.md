@@ -26,6 +26,7 @@ On the VPS, edit `/opt/dispatch/.env` (copy from `.env.example`):
 | `ADMIN_USERNAME` | Shared Otus admin portal username (both admins use this) |
 | `ADMIN_PASSWORD` | Shared Otus admin portal password |
 | `TRUST_PROXY=1` | Required behind Caddy/nginx (enables Secure cookies) |
+| `TRUST_PROXY_HOPS=2` | Proxy hops before Express (Cloudflare + Caddy = 2) |
 | `NODE_ENV=production` | Enforces `CREDENTIALS_KEY` at boot |
 
 Generate secrets:
@@ -138,7 +139,7 @@ dispatch.otusgw.com {
 
 Then `sudo systemctl reload caddy`.
 
-**B. Express trust proxy** — ensure `.env` has `TRUST_PROXY=1` and restart (`pm2 restart dispatch`). Current code sets `trust proxy` to `true` when this is set.
+**B. Express trust proxy** — ensure `.env` has `TRUST_PROXY=1` and `TRUST_PROXY_HOPS=2` (Cloudflare + Caddy), then restart (`pm2 restart dispatch`).
 
 **C. Cloudflare WAF exception** — Security → WAF → Custom rules → Skip for URI Path equals `/api/auth/login` (or disable Bot Fight Mode temporarily to test).
 

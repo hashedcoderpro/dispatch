@@ -84,8 +84,11 @@ function cetDaySqlRange(date = new Date()) {
 }
 
 const app = express();
-// Cloudflare (orange cloud) + Caddy = two proxy hops; trust all so rate limits use real client IP.
-if (process.env.TRUST_PROXY === '1') app.set('trust proxy', true);
+// Cloudflare + Caddy = two proxy hops; trust that many so rate limits see the real client IP.
+if (process.env.TRUST_PROXY === '1') {
+  const hops = Math.max(1, parseInt(process.env.TRUST_PROXY_HOPS || '2', 10) || 2);
+  app.set('trust proxy', hops);
+}
 app.use(helmet({
   contentSecurityPolicy: false,
   crossOriginEmbedderPolicy: false
@@ -226,6 +229,17 @@ function getSetting(key) {
 }
 function setSetting(key, value) {
   db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(key, value);
+}
+
+function purgeLegacyAdminSettings() {
+  const { username, password } = getAdminEnvCredentials();
+  if (!username || !password) return;
+  for (const key of ['admin_password', 'admin_username']) {
+    if (getSetting(key)) {
+      db.prepare('DELETE FROM settings WHERE key = ?').run(key);
+      console.log(`Removed legacy ${key} from database — using ADMIN_* from .env`);
+    }
+  }
 }
 
 async function refreshPortalSession(username) {
@@ -1342,9 +1356,7 @@ db.prepare(`
 app.listen(PORT, () => {
   db.migratePerUserOwnership();
   migrateLegacyUserCredentials(getSetting);
-  if (getSetting('admin_password')) {
-    console.warn('Legacy admin_password found in database — configure ADMIN_USERNAME and ADMIN_PASSWORD in .env instead');
-  }
+  purgeLegacyAdminSettings();
   console.log(`Dispatch SMS Console running at http://localhost:${PORT}`);
   console.log(`Admin console at http://localhost:${PORT}/admin`);
   restartSidAutoPoller();
