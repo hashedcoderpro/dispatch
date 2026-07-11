@@ -96,6 +96,8 @@ CREATE TABLE IF NOT EXISTS campaign_segments (
 
 try { db.exec('ALTER TABLE sends ADD COLUMN source TEXT'); } catch (e) { /* already exists */ }
 try { db.exec('ALTER TABLE sends ADD COLUMN segment_label TEXT'); } catch (e) { /* already exists */ }
+try { db.exec('ALTER TABLE sends ADD COLUMN sent_by TEXT'); } catch (e) { /* already exists */ }
+try { db.exec('ALTER TABLE campaigns ADD COLUMN created_by TEXT'); } catch (e) { /* already exists */ }
 
 db.exec(`
 CREATE TABLE IF NOT EXISTS sender_id_requests (

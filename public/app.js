@@ -218,7 +218,7 @@ async function loadDashboard() {
     { label: 'Balance', value: data.balance != null ? fmtEur(data.balance) : '—', cls: 'accent' },
     { label: 'Total sends', value: s.total_sends || 0, cls: '' },
     { label: 'Delivered', value: s.delivered || 0, cls: 'accent' },
-    { label: 'Failed / undelivered', value: (s.api_failed || 0) + (s.dlr_negative || 0), cls: 'fail' },
+    { label: 'Failed / undelivered', value: s.failed || 0, cls: 'fail' },
   ];
   document.getElementById('dashStats').innerHTML = cards.map(c => `
     <div class="card stat-card"><div class="stat-label">${c.label}</div><div class="stat-value ${c.cls}">${c.value}</div></div>
@@ -253,12 +253,6 @@ async function loadTestTemplates() {
 async function loadCampaignTemplates() {
   try {
     campaignTemplates = await api('/api/templates?purpose=campaign');
-    const seg = document.getElementById('launchSegment')?.value || 'm';
-    const count = (campaignTemplates[seg] || []).length;
-    const hint = document.getElementById('launchTemplateHint');
-    if (hint) hint.textContent = count
-      ? `${count} campaign variant${count !== 1 ? 's' : ''} for ${seg.toUpperCase()}`
-      : `No campaign templates for ${seg.toUpperCase()} — ask admin to configure`;
     return campaignTemplates;
   } catch (e) {
     return campaignTemplates;
@@ -323,10 +317,6 @@ function updateLaunchCount() {
   const leadLabel = phones ? `${phones} lead${phones !== 1 ? 's' : ''}` : (hasLeadsFile ? 'leads from file' : '0 leads');
   const msgLabel = msgCount ? `${msgCount} variant${msgCount !== 1 ? 's' : ''} (${seg.toUpperCase()})` : `0 variants (${seg.toUpperCase()})`;
   document.getElementById('launchCountTag').textContent = `${leadLabel} · ${msgLabel}`;
-  const hint = document.getElementById('launchTemplateHint');
-  if (hint) hint.textContent = msgCount
-    ? `${msgCount} campaign variant${msgCount !== 1 ? 's' : ''} for ${seg.toUpperCase()}`
-    : `No campaign templates for ${seg.toUpperCase()} — ask admin to configure`;
 }
 
 function getLaunchRotationMode() {
@@ -341,7 +331,7 @@ function getLaunchThrottleMs() {
 
 function updateLaunchDeliveryLabel() {
   const v = Number(document.getElementById('launchDeliveryMode').value);
-  document.getElementById('launchDeliveryValue').textContent = v === 1 ? 'Mix 2' : 'Mix';
+  document.getElementById('launchDeliveryValue').textContent = v === 1 ? 'Mix 2' : 'Mix 1';
 }
 
 function updateLaunchRateLabel() {

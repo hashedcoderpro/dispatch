@@ -462,8 +462,8 @@ async function processSendQueue({ username, queue, campaignId, ratePerSms, throt
 
   const insertSend = db.prepare(`
     INSERT INTO sends (campaign_id, lead_id, template_id, phone, message_text, data_coding,
-      vendor_message_id, send_error_code, send_status, message_count, message_parts, cost, source, segment_label, sent_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+      vendor_message_id, send_error_code, send_status, message_count, message_parts, cost, source, segment_label, sent_at, sent_by)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?)
   `);
 
   for (const item of queue) {
@@ -503,7 +503,8 @@ async function processSendQueue({ username, queue, campaignId, ratePerSms, throt
       result.messageParts || parts,
       cost,
       source,
-      item.segmentLabel || null
+      item.segmentLabel || null,
+      username
     );
     if (throttleMs) await new Promise(r => setTimeout(r, throttleMs));
   }
@@ -941,9 +942,9 @@ app.post('/api/quick-send', upload.none(), async (req, res) => {
   const leadRows = db.prepare('SELECT id, phone FROM leads WHERE list_id = ?').all(listId);
   const phoneToLeadId = Object.fromEntries(leadRows.map(l => [l.phone, l.id]));
   const info = db.prepare(`
-    INSERT INTO campaigns (name, list_id, roster_id, source, rotation_mode, status, rate_per_sms, throttle_ms, started_at)
-    VALUES (?, ?, 0, ?, 'sequential', 'sending', ?, ?, datetime('now'))
-  `).run(`Quick Send ${new Date().toLocaleString()}`, listId, source, rate, throttleMs);
+    INSERT INTO campaigns (name, list_id, roster_id, source, rotation_mode, status, rate_per_sms, throttle_ms, started_at, created_by)
+    VALUES (?, ?, 0, ?, 'sequential', 'sending', ?, ?, datetime('now'), ?)
+  `).run(`Quick Send ${new Date().toLocaleString()}`, listId, source, rate, throttleMs, req.sessionUsername);
   const campaignId = info.lastInsertRowid;
 
   res.json({ ok: true, campaign_id: campaignId, total_sms: queue.length });
@@ -1139,8 +1140,9 @@ app.get('/api/campaigns', (req, res) => {
     JOIN lead_lists ll ON ll.id = c.list_id
     LEFT JOIN message_rosters mr ON mr.id = c.roster_id AND c.roster_id > 0
     WHERE c.created_at >= ? AND c.created_at < ?
+      AND c.created_by = ?
     ORDER BY c.id DESC
-  `).all(start, end);
+  `).all(start, end, req.sessionUsername);
   res.json({ day: label, timezone: CET_TZ, campaigns });
 });
 
@@ -1251,9 +1253,9 @@ app.post('/api/campaigns/launch', upload.fields([
 
   const rate = SMS_RATE_EUR;
   const info = db.prepare(`
-    INSERT INTO campaigns (name, list_id, roster_id, source, rotation_mode, rate_per_sms, throttle_ms)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-  `).run(name, resolvedSegments[0].list_id, resolvedRosterId, resolvedSegments[0].source, rotation_mode || 'sequential', rate, throttle_ms || 300);
+    INSERT INTO campaigns (name, list_id, roster_id, source, rotation_mode, rate_per_sms, throttle_ms, created_by)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(name, resolvedSegments[0].list_id, resolvedRosterId, resolvedSegments[0].source, rotation_mode || 'sequential', rate, throttle_ms || 300, req.sessionUsername);
   const campaignId = info.lastInsertRowid;
 
   const insertSeg = db.prepare('INSERT INTO campaign_segments (campaign_id, list_id, source, label, sort_order) VALUES (?, ?, ?, ?, ?)');
@@ -1446,26 +1448,45 @@ app.get('/api/traffic', async (req, res) => {
 // ---------- reports ----------
 app.get('/api/reports/summary', async (req, res) => {
   const { start, end, label } = cetDaySqlRange();
-  const stats = db.prepare(`
-    SELECT
-      COUNT(*) as total_sends,
-      SUM(CASE WHEN send_status = 'sent' THEN 1 ELSE 0 END) as accepted_by_api,
-      SUM(CASE WHEN send_status = 'failed' THEN 1 ELSE 0 END) as api_failed,
-      SUM(CASE WHEN dlr_status = 'Delivered' THEN 1 ELSE 0 END) as delivered,
-      SUM(CASE WHEN dlr_status IS NOT NULL AND dlr_status != 'Delivered' THEN 1 ELSE 0 END) as dlr_negative,
-      SUM(CASE WHEN dlr_status IS NULL AND send_status = 'sent' THEN 1 ELSE 0 END) as awaiting_dlr,
-      SUM(cost) as total_spend
-    FROM sends
-    WHERE sent_at >= ? AND sent_at < ?
-  `).get(start, end);
+  const username = req.sessionUsername;
+
+  let stats = { total_sends: 0, delivered: 0, failed: 0 };
+  try {
+    const traffic = await withPortalSession(username, cookies => readTraffic(cookies, {
+      dateFrom: label,
+      dateTo: label
+    }));
+    if (traffic.needsRefresh) {
+      return res.status(401).json({ error: 'Portal session expired — sign in again' });
+    }
+    if (traffic.ok) {
+      const rows = traffic.data || [];
+      const total = traffic.totalTraffic ?? rows.length;
+      let delivered = traffic.totalDelivered;
+      if (delivered == null || delivered === 0) {
+        delivered = rows.filter(r => String(r.StringStatus || '').toLowerCase() === 'delivered').length;
+      }
+      let failed = rows.filter(r => {
+        const s = String(r.StringStatus || '').toLowerCase();
+        return s === 'failed' || s === 'rejected' || s === 'undelivered';
+      }).length;
+      if (!failed && total > delivered) failed = total - delivered;
+      stats = { total_sends: total, delivered, failed };
+    }
+  } catch (e) {
+    console.error('Dashboard traffic error:', e);
+  }
+
   const byErrorCode = db.prepare(`
     SELECT send_error_code, COUNT(*) as count FROM sends
     WHERE send_status = 'failed' AND sent_at >= ? AND sent_at < ?
+      AND sent_by = ?
     GROUP BY send_error_code
-  `).all(start, end).map(r => ({ ...r, description: ERROR_CODES[String(r.send_error_code)] || 'Unknown' }));
+  `).all(start, end, username).map(r => ({ ...r, description: ERROR_CODES[String(r.send_error_code)] || 'Unknown' }));
+
   let balance = null;
   try {
-    const bal = await fetchOtusBalance(req.sessionUsername);
+    const bal = await fetchOtusBalance(username);
     if (bal.ok) balance = bal.balance;
   } catch (e) { /* dashboard still works without balance */ }
   res.json({ stats, byErrorCode, balance, day: label, timezone: CET_TZ });

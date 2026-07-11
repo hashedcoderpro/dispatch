@@ -272,6 +272,8 @@ async function loadAdminSenderIds() {
     const { items } = await api('/api/admin/sender-ids');
     allAdminSenderIds = items || [];
     filterAdminSenderIds();
+    const pending = allAdminSenderIds.filter(s => Number(s.Active) === 2);
+    if (pending.length) toast(`${pending.length} pending SID(s) — auto-approve will process them`, false);
   } catch (e) { toast(e.message, true); }
 }
 
@@ -285,7 +287,6 @@ function filterAdminSenderIds() {
     )
     : allAdminSenderIds;
   const tbody = document.querySelector('#adminSidTable tbody');
-  const pending = rows.filter(s => Number(s.Active) === 2);
   tbody.innerHTML = rows.length
     ? rows.slice(0, 200).map(s => `
       <tr>
@@ -296,7 +297,6 @@ function filterAdminSenderIds() {
       </tr>
     `).join('')
     : '<tr><td colspan="4" class="empty-state">No sender IDs found</td></tr>';
-  if (pending.length) toast(`${pending.length} pending SID(s) — auto-approve will process them`, false);
 }
 
 async function initApp() {

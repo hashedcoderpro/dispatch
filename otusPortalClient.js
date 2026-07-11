@@ -2,7 +2,7 @@ const fetch = require('node-fetch');
 
 const OTUS_BASE_URL = 'https://otusprivategw.com';
 
-const SENDER_ID_REGEX = /^(?=.*[a-zA-Z0-9|\-.,&' ])([a-zA-Z0-9?|\-._,&' ]{1,15})$/;
+const SENDER_ID_REGEX = /^(?=.*[a-zA-Z0-9|\-.,&' ])([a-zA-Z0-9?|\-._,&' ]{1,11})$/;
 
 function mergeCookies(jar, headers) {
   const raw = headers.raw && headers.raw()['set-cookie'];
@@ -21,7 +21,7 @@ function cookieHeader(jar) {
 function validateSenderId(sender) {
   const s = String(sender || '').trim();
   if (!s) return { ok: false, error: 'Sender ID is required' };
-  if (s.length > 15) return { ok: false, error: 'Sender ID cannot be longer than 15 characters' };
+  if (s.length > 11) return { ok: false, error: 'Sender ID cannot be longer than 11 characters' };
   if (!SENDER_ID_REGEX.test(s)) return { ok: false, error: 'Sender ID format is not valid for Otus' };
   return { ok: true, value: s };
 }
