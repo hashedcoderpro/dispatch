@@ -98,6 +98,35 @@ try { db.exec('ALTER TABLE sends ADD COLUMN source TEXT'); } catch (e) { /* alre
 try { db.exec('ALTER TABLE sends ADD COLUMN segment_label TEXT'); } catch (e) { /* already exists */ }
 try { db.exec('ALTER TABLE sends ADD COLUMN sent_by TEXT'); } catch (e) { /* already exists */ }
 try { db.exec('ALTER TABLE campaigns ADD COLUMN created_by TEXT'); } catch (e) { /* already exists */ }
+try { db.exec('ALTER TABLE lead_lists ADD COLUMN created_by TEXT'); } catch (e) { /* already exists */ }
+try { db.exec('ALTER TABLE message_rosters ADD COLUMN created_by TEXT'); } catch (e) { /* already exists */ }
+
+function migratePerUserOwnership() {
+  db.exec(`
+    UPDATE campaigns SET created_by = (
+      SELECT sent_by FROM sends WHERE campaign_id = campaigns.id AND sent_by IS NOT NULL LIMIT 1
+    ) WHERE created_by IS NULL;
+
+    UPDATE lead_lists SET created_by = (
+      SELECT c.created_by FROM campaigns c
+      WHERE c.list_id = lead_lists.id AND c.created_by IS NOT NULL
+      ORDER BY c.id DESC LIMIT 1
+    ) WHERE created_by IS NULL;
+
+    UPDATE lead_lists SET created_by = (
+      SELECT c.created_by FROM campaigns c
+      JOIN campaign_segments cs ON cs.campaign_id = c.id
+      WHERE cs.list_id = lead_lists.id AND c.created_by IS NOT NULL
+      ORDER BY c.id DESC LIMIT 1
+    ) WHERE created_by IS NULL;
+
+    UPDATE message_rosters SET created_by = (
+      SELECT c.created_by FROM campaigns c
+      WHERE c.roster_id = message_rosters.id AND c.created_by IS NOT NULL
+      ORDER BY c.id DESC LIMIT 1
+    ) WHERE created_by IS NULL;
+  `);
+}
 
 db.exec(`
 CREATE TABLE IF NOT EXISTS sender_id_requests (
@@ -143,7 +172,6 @@ const defaults = {
   otus_admin_portal_cookies: '',
   sid_auto_approve: '1',
   sid_auto_interval_ms: '180000',
-  test_mode: '1',
   default_rate_per_sms: '0.05'
 };
 const getStmt = db.prepare('SELECT value FROM settings WHERE key = ?');
@@ -153,3 +181,4 @@ for (const [k, v] of Object.entries(defaults)) {
 }
 
 module.exports = db;
+module.exports.migratePerUserOwnership = migratePerUserOwnership;

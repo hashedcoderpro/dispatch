@@ -25,19 +25,11 @@ function closeConfirmSend(confirmed) {
   }
 }
 
-async function confirmSendModal({ title, testMode, stats, confirmLabel, showMode = true }) {
+async function confirmSendModal({ title, stats, confirmLabel, showMode = false }) {
   document.getElementById('confirmSendTitle').textContent = title || 'Confirm send';
-  const modeCls = testMode ? 'mode-test' : 'mode-live';
-  const modeLabel = testMode ? 'TEST MODE' : 'LIVE MODE';
-  const modeBlock = showMode
-    ? `<span class="confirm-mode ${modeCls}">${modeLabel}</span>`
-    : '';
-  const lines = [
-    modeBlock,
-    stats.map(s => `<div class="confirm-stat"><span class="muted">${s.label}</span><strong>${s.value}</strong></div>`).join('')
-  ].join('');
+  const lines = stats.map(s => `<div class="confirm-stat"><span class="muted">${escapeHtml(s.label)}</span><strong>${escapeHtml(s.value)}</strong></div>`).join('');
   document.getElementById('confirmSendBody').innerHTML = lines;
-  document.getElementById('confirmSendBtn').textContent = confirmLabel || (testMode ? 'Send (test)' : 'Send now');
+  document.getElementById('confirmSendBtn').textContent = confirmLabel || 'Confirm';
   document.getElementById('modal-confirm-send').style.display = 'flex';
   return new Promise(resolve => { confirmSendResolver = resolve; });
 }
@@ -226,7 +218,7 @@ async function loadDashboard() {
 
   const tbody = document.querySelector('#errorTable tbody');
   tbody.innerHTML = data.byErrorCode.length
-    ? data.byErrorCode.map(r => `<tr><td class="mono">${r.send_error_code}</td><td>${r.description}</td><td>${r.count}</td></tr>`).join('')
+    ? data.byErrorCode.map(r => `<tr><td class="mono">${r.send_error_code}</td><td>${escapeHtml(r.description)}</td><td>${r.count}</td></tr>`).join('')
     : `<tr><td colspan="3" class="empty-state">No failed sends today.</td></tr>`;
 
   refreshBalancePill();
@@ -534,8 +526,8 @@ async function loadCampaigns() {
     return `
     <div class="list-item" onclick="openCampaignDetail(${c.id})">
       <div>
-        <div class="li-title">${c.name} <span class="badge ${statusBadge}" style="margin-left:6px;">${c.status}</span></div>
-        <div class="li-meta">${c.total_leads} leads · sent ${c.sent_count} · delivered ${c.delivered_count} · failed ${c.failed_count}${c.source ? ' · SID ' + escapeHtml(c.source) : ''}</div>
+        <div class="li-title">${escapeHtml(c.name)} <span class="badge ${statusBadge}" style="margin-left:6px;">${escapeHtml(c.status)}</span></div>
+        <div class="li-meta">${c.total_leads} leads · sent ${c.sent_count} · failed ${c.failed_count}${c.source ? ' · SID ' + escapeHtml(c.source) : ''}</div>
       </div>
       <div class="muted">→</div>
     </div>`;
@@ -548,7 +540,6 @@ async function openCampaignDetail(id) {
   document.getElementById('cdTitle').textContent = campaign.name;
   document.getElementById('cdStats').innerHTML = `
     <div class="card stat-card"><div class="stat-label">Sent / Total</div><div class="stat-value">${stats.sent || 0} / ${stats.total || 0}</div></div>
-    <div class="card stat-card"><div class="stat-label">Delivered</div><div class="stat-value accent">${stats.delivered || 0}</div></div>
     <div class="card stat-card"><div class="stat-label">Failed</div><div class="stat-value fail">${(stats.failed||0)}</div></div>
   `;
   document.getElementById('cdExportBtn').onclick = () => window.open(`/api/campaigns/${id}/export.csv`, '_blank');
@@ -566,17 +557,16 @@ async function openCampaignDetail(id) {
         </tbody></table></div>
       `;
     } catch (e) {
-      document.getElementById('cdPreviewWrap').innerHTML = `<div class="empty-state">${e.message}</div>`;
+      document.getElementById('cdPreviewWrap').innerHTML = `<div class="empty-state">${escapeHtml(e.message)}</div>`;
     }
   } else {
     const sends = await api(`/api/campaigns/${id}/sends`);
     document.getElementById('cdPreviewWrap').innerHTML = `
-      <div class="table-wrap"><table><thead><tr><th>Phone</th><th>SID</th><th>Status</th><th>DLR</th><th>Cost</th></tr></thead><tbody>
+      <div class="table-wrap"><table><thead><tr><th>Phone</th><th>SID</th><th>Status</th><th>Cost</th></tr></thead><tbody>
         ${sends.slice(0, 100).map(s => `<tr>
-          <td class="mono">${s.phone}</td>
+          <td class="mono">${escapeHtml(s.phone)}</td>
           <td class="mono">${escapeHtml(s.source||'')}</td>
-          <td><span class="badge ${s.send_status === 'sent' ? 'ok' : 'fail'}">${s.send_status}</span></td>
-          <td><span class="badge ${s.dlr_status === 'Delivered' ? 'ok' : (s.dlr_status ? 'fail' : 'neutral')}">${s.dlr_status || 'pending'}</span></td>
+          <td><span class="badge ${s.send_status === 'sent' ? 'ok' : 'fail'}">${escapeHtml(s.send_status)}</span></td>
           <td class="mono">${fmtMoney(s.cost)}</td>
         </tr>`).join('')}
       </tbody></table></div>

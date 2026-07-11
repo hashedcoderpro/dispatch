@@ -5,20 +5,14 @@ Node.js + Express + SQLite backend, plain HTML/JS frontend (no build step).
 
 ## What it does
 
-- **Lead lists** — upload a CSV of 500–1,000 contacts. Phone/name/custom columns are
-  auto-detected. Numbers are normalized (no `+`, deduped, validated) on import.
-- **Message rosters** — paste or upload 50–100 message variants. Campaigns rotate
-  through them (sequential or random) so contacts don't get identical text.
-  Supports `{name}`, `{phone}`, `{custom1}`, `{custom2}` merge fields.
-- **Campaigns** — pair a list + a roster, preview exactly what will be sent (with
-  segment counts and estimated cost) before committing, then send.
-- **Balance tracking** — Vacotel's API doesn't expose account balance, so balance is
-  tracked manually: top it up, set a rate per SMS segment per campaign, and the app
-  deducts automatically as messages send (using the real segment count returned by
-  the API, not just character count).
-- **Reports** — per-campaign and account-wide delivery reports, error code
-  breakdown, CSV export. A `/api/dlr` webhook endpoint ingests Vacotel's delivery
-  receipts and matches them back to sends by vendor message ID.
+- **Quick send** — send test SMS to pasted numbers using admin-configured message templates.
+- **Campaigns** — launch a campaign with pasted/uploaded leads and admin-configured campaign
+  templates. Preview before sending, with segment counts and estimated cost.
+- **Balance** — live balance from each user's Otus account after sign-in.
+- **Reports** — per-campaign send logs, error code breakdown, CSV export.
+  Delivery stats come from the **Otus portal traffic report** (live, per logged-in user).
+- **Multi-user** — each send user sees only their own campaigns, leads, and sends.
+  Admin sets shared M/P message templates for all users.
 
 ## Setup
 
@@ -27,19 +21,8 @@ npm install
 npm start
 ```
 
-Open `http://localhost:3000`. Go to **Settings** and enter your Vacotel username/
-password. Leave **Test mode** on until you're ready to send real messages — it
-simulates the API so you can safely try the whole flow first.
-
-## Pointing Vacotel's DLR callback at this app
-
-Vacotel needs to reach `/api/dlr` on a public URL. Options:
-- Deploy the app on a small VPS / server with a public IP or domain (recommended
-  for production — see below).
-- For local testing, use a tunnel like `ngrok http 3000` and give Vacotel the
-  resulting `https://xxxx.ngrok.app/api/dlr` URL.
-
-The Settings page shows the exact URL to hand to Vacotel once you know your host.
+Open `http://localhost:3000`. Sign in with your Otus username, portal password,
+and API token. All sends are live — use the Traffic Report to verify delivery.
 
 ## Deploying for real use
 
@@ -77,9 +60,9 @@ Roughly in priority order:
    TCPA/compliance, not just niceness.
 2. **Scheduling** — let a campaign be scheduled for a future time or spread over a
    window (e.g. "send over 4 hours") instead of only "send now."
-3. **Per-user accounts / roles** — right now anyone with access to the app can send
-   and see the API password. Add login + an admin-only settings page if more than
-   one person will use it.
+3. **Per-user accounts** — each send user signs in with their own Otus credentials;
+   campaigns and leads are isolated per user. Admin console at `/admin` for templates
+   and account management.
 4. **Column mapping UI** — right now phone/name/custom columns are auto-detected by
    header name; a manual mapping step would help with messier client CSVs.
 5. **Retry logic** — auto-retry sends that fail with transient errors (e.g.

@@ -61,8 +61,7 @@ function rowToCredentials(row) {
     username: row.username,
     password,
     apiId,
-    portalCookies,
-    testMode: row.test_mode === '1'
+    portalCookies
   };
 }
 
@@ -71,24 +70,20 @@ function getUserCredentials(username) {
   return rowToCredentials(row);
 }
 
-function upsertUserCredentials(username, { password, apiId, portalCookies, testMode }) {
-  const existing = db.prepare('SELECT test_mode FROM user_credentials WHERE username = ?').get(username);
-  const testVal = testMode !== undefined ? (testMode ? '1' : '0') : (existing?.test_mode || '1');
+function upsertUserCredentials(username, { password, apiId, portalCookies }) {
   db.prepare(`
     INSERT INTO user_credentials (username, password_enc, api_id_enc, portal_cookies_enc, test_mode, updated_at)
-    VALUES (?, ?, ?, ?, ?, datetime('now'))
+    VALUES (?, ?, ?, ?, '0', datetime('now'))
     ON CONFLICT(username) DO UPDATE SET
       password_enc = excluded.password_enc,
       api_id_enc = excluded.api_id_enc,
       portal_cookies_enc = excluded.portal_cookies_enc,
-      test_mode = excluded.test_mode,
       updated_at = datetime('now')
   `).run(
     username,
     encrypt(password),
     encrypt(apiId),
-    portalCookies ? encrypt(JSON.stringify(portalCookies)) : null,
-    testVal
+    portalCookies ? encrypt(JSON.stringify(portalCookies)) : null
   );
 }
 
@@ -96,12 +91,6 @@ function updateUserPortalCookies(username, portalCookies) {
   db.prepare(`
     UPDATE user_credentials SET portal_cookies_enc = ?, updated_at = datetime('now') WHERE username = ?
   `).run(portalCookies ? encrypt(JSON.stringify(portalCookies)) : null, username);
-}
-
-function updateUserTestMode(username, testMode) {
-  db.prepare(`
-    UPDATE user_credentials SET test_mode = ?, updated_at = datetime('now') WHERE username = ?
-  `).run(testMode ? '1' : '0', username);
 }
 
 function hasUserCredentials(username) {
@@ -121,8 +110,7 @@ function migrateLegacyUserCredentials(getSetting) {
   } catch {
     portalCookies = null;
   }
-  const testMode = getSetting('test_mode') === '1';
-  upsertUserCredentials(username, { password, apiId, portalCookies, testMode });
+  upsertUserCredentials(username, { password, apiId, portalCookies });
   console.log(`Migrated legacy credentials for user "${username}" to user_credentials table`);
 }
 
@@ -132,7 +120,6 @@ module.exports = {
   getUserCredentials,
   upsertUserCredentials,
   updateUserPortalCookies,
-  updateUserTestMode,
   hasUserCredentials,
   migrateLegacyUserCredentials
 };

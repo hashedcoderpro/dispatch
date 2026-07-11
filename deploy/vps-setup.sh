@@ -113,11 +113,9 @@ env PATH="$PATH:/usr/bin" pm2 startup systemd -u root --hp /root >/dev/null 2>&1
 
 PUBLIC_IP="$(curl -fsSL -4 ifconfig.me 2>/dev/null || curl -fsSL -4 icanhazip.com 2>/dev/null || hostname -I | awk '{print $1}')"
 
-DLR_HINT="http://${PUBLIC_IP}:${PORT}/api/dlr"
 APP_URL="http://${PUBLIC_IP}:${PORT}"
 if [[ -n "$DOMAIN" ]]; then
   APP_URL="https://${DOMAIN}"
-  DLR_HINT="https://${DOMAIN}/api/dlr"
 fi
 
 echo ""
@@ -126,15 +124,13 @@ echo "  Dispatch is running"
 echo "============================================"
 echo "  App URL:      ${APP_URL}"
 echo "  Admin:        ${APP_URL}/admin"
-echo "  DLR webhook:  ${DLR_HINT}"
 echo "  Whitelist IP: ${PUBLIC_IP}  (give this to Vacotel)"
 echo ""
 echo "  Before going live:"
 echo "  1. Edit ${APP_DIR}/.env (see .env.example)"
 echo "  2. pm2 restart dispatch"
-echo "  3. Vacotel DLR URL unchanged unless you add HTTPS/domain or optional DLR_SECRET"
-echo "  4. Each send user signs in with their own Otus credentials"
-echo "  5. Admins sign in at /admin with the shared ADMIN_* credentials"
+echo "  3. Each send user signs in with their own Otus credentials"
+echo "  4. Admins sign in at /admin with the shared ADMIN_* credentials"
 echo ""
 echo "  Logs:    pm2 logs dispatch"
 echo "  Update:  cd $APP_DIR && git pull && npm install --omit=dev && pm2 restart dispatch"

@@ -80,23 +80,10 @@ function parseApiResponse(bodyText, defaultParts) {
  * 1) Private gateway (Otus etc): GET /API/SendSMS?username=&apiId=&json=True&...
  * 2) Legacy Vacotel docs: POST /HTTP/api/Client/SendSMS with Username/Password headers
  */
-async function sendSms({ baseUrl, username, password, apiId, destination, source, text, dataCoding, testMode }) {
+async function sendSms({ baseUrl, username, password, apiId, destination, source, text, dataCoding }) {
   const dest = normalizeDestination(destination);
   const parts = analyzeMessage(text).parts;
   const coding = dataCoding ?? analyzeMessage(text).dataCoding;
-
-  if (testMode) {
-    await new Promise(r => setTimeout(r, 50));
-    return {
-      ok: true,
-      errorCode: 0,
-      errorDescription: 'Ok (test mode - not actually sent)',
-      vendorId: 'test-' + Math.random().toString(36).slice(2, 10),
-      messageCount: 1,
-      messageParts: parts,
-      raw: null
-    };
-  }
 
   let resp;
   try {
@@ -150,8 +137,7 @@ async function probeVacotelApi({ baseUrl, username, password, apiId }) {
     destination: '0',
     source: 'Dispatch',
     text: 'probe',
-    dataCoding: 0,
-    testMode: false
+    dataCoding: 0
   });
 
   const ms = Date.now() - started;
@@ -229,16 +215,6 @@ const ERROR_CODES = {
   '-11': 'InvalidInstanceConnection'
 };
 
-const DLR_STATUS = {
-  2: 'Delivered',
-  3: 'Expired',
-  4: 'Deleted',
-  5: 'Undelivered',
-  6: 'Accepted',
-  7: 'Invalid',
-  8: 'Rejected'
-};
-
 module.exports = {
   VACOTEL_GATEWAY_URL,
   sendSms,
@@ -246,6 +222,5 @@ module.exports = {
   normalizeDestination,
   probeVacotelApi,
   validateVacotelCredentials,
-  ERROR_CODES,
-  DLR_STATUS
+  ERROR_CODES
 };

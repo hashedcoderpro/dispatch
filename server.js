@@ -12,7 +12,6 @@ const {
   getUserCredentials,
   upsertUserCredentials,
   updateUserPortalCookies,
-  updateUserTestMode,
   hasUserCredentials,
   migrateLegacyUserCredentials
 } = require('./credentials');
@@ -23,8 +22,7 @@ const {
   normalizeDestination,
   probeVacotelApi,
   validateVacotelCredentials,
-  ERROR_CODES,
-  DLR_STATUS
+  ERROR_CODES
 } = require('./vacotelClient');
 const {
   parseLines, parsePhones, buildInterleavedQueue, buildCartesianQueue, assignTemplates, estimateCost
@@ -192,18 +190,8 @@ function getAdminEnvCredentials() {
   return { username, password };
 }
 
-function requireDlrAuth(req, res, next) {
-  const secret = process.env.DLR_SECRET;
-  if (!secret) return next();
-  const token = req.query.token;
-  if (!token || token.length !== secret.length || !crypto.timingSafeEqual(Buffer.from(token), Buffer.from(secret))) {
-    return res.status(401).json({ error: 'Unauthorized' });
-  }
-  next();
-}
-
 function requireAuth(req, res, next) {
-  if (!req.path.startsWith('/api/') || req.path === '/api/dlr') return next();
+  if (!req.path.startsWith('/api/')) return next();
 
   if (req.path.startsWith('/api/admin/')) {
     if (PUBLIC_ADMIN_API.has(req.path)) return next();
@@ -430,10 +418,25 @@ function loadSegmentLeads(segment) {
   return db.prepare('SELECT * FROM leads WHERE list_id = ? AND opted_out = 0 ORDER BY id').all(segment.list_id);
 }
 
-function createRosterFromMessages(name, messages) {
-  const insertRoster = db.prepare('INSERT INTO message_rosters (name) VALUES (?)');
+function ownedCampaignOr404(req, res) {
+  const campaign = db.prepare('SELECT * FROM campaigns WHERE id = ? AND created_by = ?')
+    .get(req.params.id, req.sessionUsername);
+  if (!campaign) {
+    res.status(404).json({ error: 'not found' });
+    return null;
+  }
+  return campaign;
+}
+
+function ownedLeadListOrNull(listId, username) {
+  const row = db.prepare('SELECT id FROM lead_lists WHERE id = ? AND created_by = ?').get(listId, username);
+  return row || null;
+}
+
+function createRosterFromMessages(name, messages, username) {
+  const insertRoster = db.prepare('INSERT INTO message_rosters (name, created_by) VALUES (?, ?)');
   const insertTpl = db.prepare('INSERT INTO message_templates (roster_id, text) VALUES (?, ?)');
-  const info = insertRoster.run(name);
+  const info = insertRoster.run(name, username);
   const rosterId = info.lastInsertRowid;
   let count = 0;
   for (const m of messages) {
@@ -445,10 +448,10 @@ function createRosterFromMessages(name, messages) {
   return { rosterId, count };
 }
 
-function createListFromPhones(name, phones) {
-  const insertList = db.prepare('INSERT INTO lead_lists (name) VALUES (?)');
+function createListFromPhones(name, phones, username) {
+  const insertList = db.prepare('INSERT INTO lead_lists (name, created_by) VALUES (?, ?)');
   const insertLead = db.prepare('INSERT INTO leads (list_id, phone) VALUES (?, ?)');
-  const info = insertList.run(name);
+  const info = insertList.run(name, username);
   const listId = info.lastInsertRowid;
   for (const phone of phones) insertLead.run(listId, phone);
   return { listId, count: phones.length };
@@ -458,7 +461,6 @@ async function processSendQueue({ username, queue, campaignId, ratePerSms, throt
   const creds = getUserCredentials(username);
   if (!creds) throw new Error('User credentials not found');
   const apiId = creds.apiId;
-  const testMode = false;
 
   const insertSend = db.prepare(`
     INSERT INTO sends (campaign_id, lead_id, template_id, phone, message_text, data_coding,
@@ -481,8 +483,7 @@ async function processSendQueue({ username, queue, campaignId, ratePerSms, throt
         destination: phone,
         source,
         text,
-        dataCoding,
-        testMode
+        dataCoding
       });
     } catch (e) {
       result = { ok: false, errorCode: -10, errorDescription: 'Network/request error: ' + e.message };
@@ -549,8 +550,7 @@ app.post('/api/auth/login', userLoginLimiter, async (req, res) => {
   upsertUserCredentials(username, {
     password,
     apiId,
-    portalCookies: portal.cookies,
-    testMode: false
+    portalCookies: portal.cookies
   });
   setSetting('vacotel_base_url', VACOTEL_GATEWAY_URL);
   setSessionCookie(res, username);
@@ -744,20 +744,10 @@ app.put('/api/admin/sid-auto', (req, res) => {
 
 // ---------- settings ----------
 app.get('/api/settings', (req, res) => {
-  const creds = getUserCredentials(req.sessionUsername);
   res.json({
     vacotel_username: req.sessionUsername,
-    test_mode: creds?.testMode ?? true,
     default_rate_per_sms: SMS_RATE_EUR
   });
-});
-
-app.post('/api/settings', (req, res) => {
-  const { test_mode } = req.body;
-  if (test_mode !== undefined) updateUserTestMode(req.sessionUsername, !!test_mode);
-  setSetting('default_rate_per_sms', String(SMS_RATE_EUR));
-  const creds = getUserCredentials(req.sessionUsername);
-  res.json({ ok: true, test_mode: creds?.testMode ?? true });
 });
 
 // ---------- sender IDs (Otus portal) ----------
@@ -779,8 +769,8 @@ app.get('/api/sender-ids', async (req, res) => {
 
     const local = db.prepare(`
       SELECT id, source, otus_sender_id, status, description, created_at, updated_at
-      FROM sender_id_requests ORDER BY id DESC LIMIT 100
-    `).all();
+      FROM sender_id_requests WHERE requested_by = ? ORDER BY id DESC LIMIT 100
+    `).all(req.sessionUsername);
 
     res.json({
       otus: result.items.map(item => ({
@@ -925,20 +915,17 @@ app.post('/api/quick-send', upload.none(), async (req, res) => {
 
   const queue = buildCartesianQueue(phones, messages);
   const estCost = estimateCost(queue, rate, null);
-  const creds = getUserCredentials(req.sessionUsername);
-  if (!creds?.testMode) {
-    const balCheck = await checkBalanceForCost(req.sessionUsername, estCost);
-    if (!balCheck.ok) {
-      const status = balCheck.needsRefresh ? 401 : 400;
-      return res.status(status).json({
-        error: balCheck.error,
-        estimated_cost: estCost,
-        balance: balCheck.balance
-      });
-    }
+  const balCheck = await checkBalanceForCost(req.sessionUsername, estCost);
+  if (!balCheck.ok) {
+    const status = balCheck.needsRefresh ? 401 : 400;
+    return res.status(status).json({
+      error: balCheck.error,
+      estimated_cost: estCost,
+      balance: balCheck.balance
+    });
   }
 
-  const { listId } = createListFromPhones(`Quick Send ${new Date().toISOString().slice(0, 16)}`, phones);
+  const { listId } = createListFromPhones(`Quick Send ${new Date().toISOString().slice(0, 16)}`, phones, req.sessionUsername);
   const leadRows = db.prepare('SELECT id, phone FROM leads WHERE list_id = ?').all(listId);
   const phoneToLeadId = Object.fromEntries(leadRows.map(l => [l.phone, l.id]));
   const info = db.prepare(`
@@ -970,158 +957,6 @@ app.post('/api/quick-send', upload.none(), async (req, res) => {
   }
 });
 
-// ---------- lead lists ----------
-app.get('/api/lead-lists', (req, res) => {
-  const lists = db.prepare(`
-    SELECT ll.*, (SELECT COUNT(*) FROM leads WHERE list_id = ll.id) as lead_count
-    FROM lead_lists ll ORDER BY id DESC
-  `).all();
-  res.json(lists);
-});
-
-app.post('/api/lead-lists', upload.single('file'), (req, res) => {
-  const name = (req.body.name || '').trim() || req.file?.originalname || 'Lead list';
-
-  if (req.file) {
-    const filename = req.file.originalname.toLowerCase();
-    if (!filename.endsWith('.csv')) {
-      const phones = parsePhones(req.file.buffer.toString('utf8'));
-      if (!phones.length) return res.status(400).json({ error: 'No valid phone numbers in file' });
-      const created = createListFromPhones(name, phones);
-      return res.json({ ok: true, list_id: created.listId, inserted: created.count, skipped: 0 });
-    }
-  } else if (req.body.numbers) {
-    const phones = parsePhones(req.body.numbers);
-    if (!phones.length) return res.status(400).json({ error: 'No valid phone numbers' });
-    const created = createListFromPhones(name, phones);
-    return res.json({ ok: true, list_id: created.listId, inserted: created.count, skipped: 0 });
-  } else {
-    return res.status(400).json({ error: 'Paste numbers or upload a .txt / .csv file' });
-  }
-
-  // CSV upload (req.file is present and .csv)
-  let records;
-  try {
-    records = parse(req.file.buffer, { columns: true, skip_empty_lines: true, trim: true });
-  } catch (e) {
-    return res.status(400).json({ error: 'Could not parse CSV: ' + e.message });
-  }
-  if (!records.length) return res.status(400).json({ error: 'CSV is empty' });
-
-  // find phone column flexibly
-  const cols = Object.keys(records[0]);
-  const phoneCol = cols.find(c => /phone|mobile|destination|number/i.test(c)) || cols[0];
-  const nameCol = cols.find(c => /^name$|first.?name|full.?name/i.test(c));
-  const custom1Col = cols.find(c => /custom1|company|note/i.test(c));
-  const custom2Col = cols.find(c => /custom2|account|id$/i.test(c));
-
-  const insertList = db.prepare('INSERT INTO lead_lists (name) VALUES (?)');
-  const insertLead = db.prepare('INSERT INTO leads (list_id, phone, name, custom1, custom2) VALUES (?, ?, ?, ?, ?)');
-
-  let inserted = 0, skipped = 0;
-  const tx = db.transaction(() => {
-    const info = insertList.run(name);
-    const listId = info.lastInsertRowid;
-    const seen = new Set();
-    for (const r of records) {
-      const rawPhone = r[phoneCol];
-      if (!rawPhone) { skipped++; continue; }
-      const phone = normalizeDestination(rawPhone);
-      if (!/^\d{7,15}$/.test(phone)) { skipped++; continue; }
-      if (seen.has(phone)) { skipped++; continue; }
-      seen.add(phone);
-      insertLead.run(listId, phone, nameCol ? r[nameCol] : null, custom1Col ? r[custom1Col] : null, custom2Col ? r[custom2Col] : null);
-      inserted++;
-    }
-    return listId;
-  });
-
-  const listId = tx();
-  res.json({ ok: true, list_id: listId, inserted, skipped, detected_columns: { phoneCol, nameCol, custom1Col, custom2Col } });
-});
-
-app.get('/api/lead-lists/:id/leads', (req, res) => {
-  const leads = db.prepare('SELECT * FROM leads WHERE list_id = ? ORDER BY id').all(req.params.id);
-  res.json(leads);
-});
-
-app.delete('/api/lead-lists/:id', (req, res) => {
-  db.prepare('DELETE FROM leads WHERE list_id = ?').run(req.params.id);
-  db.prepare('DELETE FROM lead_lists WHERE id = ?').run(req.params.id);
-  res.json({ ok: true });
-});
-
-// ---------- message rosters ----------
-app.get('/api/rosters', (req, res) => {
-  const rosters = db.prepare(`
-    SELECT mr.*, (SELECT COUNT(*) FROM message_templates WHERE roster_id = mr.id) as template_count
-    FROM message_rosters mr ORDER BY id DESC
-  `).all();
-  res.json(rosters);
-});
-
-app.post('/api/rosters', (req, res) => {
-  // accepts either { name, messages: [text, ...] } as JSON, used for both
-  // pasted-in text and CSV-parsed-on-the-client-then-posted flows
-  const { name, messages } = req.body;
-  if (!name || !Array.isArray(messages) || !messages.length) {
-    return res.status(400).json({ error: 'name and messages[] required' });
-  }
-  const insertRoster = db.prepare('INSERT INTO message_rosters (name) VALUES (?)');
-  const insertTpl = db.prepare('INSERT INTO message_templates (roster_id, text) VALUES (?, ?)');
-  const tx = db.transaction(() => {
-    const info = insertRoster.run(name);
-    const rosterId = info.lastInsertRowid;
-    let count = 0;
-    for (const m of messages) {
-      const text = String(m).trim();
-      if (!text) continue;
-      insertTpl.run(rosterId, text);
-      count++;
-    }
-    return { rosterId, count };
-  });
-  const result = tx();
-  res.json({ ok: true, roster_id: result.rosterId, inserted: result.count });
-});
-
-app.post('/api/rosters/upload', upload.single('file'), (req, res) => {
-  if (!req.file) return res.status(400).json({ error: 'CSV/TXT file required' });
-  const name = req.body.name || req.file.originalname;
-  const text = req.file.buffer.toString('utf8');
-  let messages;
-  if (req.file.originalname.toLowerCase().endsWith('.csv')) {
-    const records = parse(text, { columns: false, skip_empty_lines: true, trim: true });
-    messages = records.map(r => r[0]);
-  } else {
-    messages = text.split('\n');
-  }
-  messages = messages.map(m => m.trim()).filter(Boolean);
-  if (!messages.length) return res.status(400).json({ error: 'No messages found in file' });
-
-  const insertRoster = db.prepare('INSERT INTO message_rosters (name) VALUES (?)');
-  const insertTpl = db.prepare('INSERT INTO message_templates (roster_id, text) VALUES (?, ?)');
-  const tx = db.transaction(() => {
-    const info = insertRoster.run(name);
-    const rosterId = info.lastInsertRowid;
-    for (const m of messages) insertTpl.run(rosterId, m);
-    return rosterId;
-  });
-  const rosterId = tx();
-  res.json({ ok: true, roster_id: rosterId, inserted: messages.length });
-});
-
-app.get('/api/rosters/:id/templates', (req, res) => {
-  const templates = db.prepare('SELECT * FROM message_templates WHERE roster_id = ? ORDER BY id').all(req.params.id);
-  res.json(templates);
-});
-
-app.delete('/api/rosters/:id', (req, res) => {
-  db.prepare('DELETE FROM message_templates WHERE roster_id = ?').run(req.params.id);
-  db.prepare('DELETE FROM message_rosters WHERE id = ?').run(req.params.id);
-  res.json({ ok: true });
-});
-
 // ---------- campaigns ----------
 app.get('/api/campaigns', (req, res) => {
   const { start, end, label } = cetDaySqlRange();
@@ -1134,11 +969,10 @@ app.get('/api/campaigns', (req, res) => {
       ) as total_leads,
       (SELECT COUNT(*) FROM sends WHERE campaign_id = c.id) as sent_count,
       (SELECT COUNT(*) FROM sends WHERE campaign_id = c.id AND send_status = 'failed') as failed_count,
-      (SELECT COUNT(*) FROM sends WHERE campaign_id = c.id AND dlr_status = 'Delivered') as delivered_count,
       (SELECT COALESCE(SUM(cost), 0) FROM sends WHERE campaign_id = c.id) as total_spend
     FROM campaigns c
-    JOIN lead_lists ll ON ll.id = c.list_id
-    LEFT JOIN message_rosters mr ON mr.id = c.roster_id AND c.roster_id > 0
+    JOIN lead_lists ll ON ll.id = c.list_id AND ll.created_by = c.created_by
+    LEFT JOIN message_rosters mr ON mr.id = c.roster_id AND c.roster_id > 0 AND mr.created_by = c.created_by
     WHERE c.created_at >= ? AND c.created_at < ?
       AND c.created_by = ?
     ORDER BY c.id DESC
@@ -1146,39 +980,7 @@ app.get('/api/campaigns', (req, res) => {
   res.json({ day: label, timezone: CET_TZ, campaigns });
 });
 
-app.post('/api/campaigns', (req, res) => {
-  const { name, list_id, roster_id, source, rotation_mode, rate_per_sms, throttle_ms, segments } = req.body;
-  if (!name || !roster_id) {
-    return res.status(400).json({ error: 'name and roster_id required' });
-  }
-
-  const segList = Array.isArray(segments) && segments.length ? segments : null;
-  if (!segList && (!list_id || !source)) {
-    return res.status(400).json({ error: 'list_id and source required (or provide segments[])' });
-  }
-
-  const primaryList = segList ? segList[0].list_id : list_id;
-  const primarySource = segList ? segList[0].source : source;
-  const rate = SMS_RATE_EUR;
-
-  const info = db.prepare(`
-    INSERT INTO campaigns (name, list_id, roster_id, source, rotation_mode, rate_per_sms, throttle_ms)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-  `).run(name, primaryList, roster_id, primarySource, rotation_mode || 'sequential', rate, throttle_ms || 300);
-  const campaignId = info.lastInsertRowid;
-
-  if (segList) {
-    const insertSeg = db.prepare('INSERT INTO campaign_segments (campaign_id, list_id, source, label, sort_order) VALUES (?, ?, ?, ?, ?)');
-    segList.forEach((s, i) => {
-      if (!s.list_id || !s.source) throw new Error('Each segment needs list_id and source (SID)');
-      insertSeg.run(campaignId, s.list_id, s.source, s.label || null, i);
-    });
-  }
-
-  res.json({ ok: true, campaign_id: campaignId });
-});
-
-// Launch campaign: inline uploads for messages + per-client lead lists/SIDs
+// Launch campaign: inline uploads for messages + per-user lead lists/SIDs
 app.post('/api/campaigns/launch', upload.fields([
   { name: 'segment_files', maxCount: 20 }
 ]), (req, res) => {
@@ -1201,7 +1003,7 @@ app.post('/api/campaigns/launch', upload.fields([
     if (!msgList || !msgList.length) {
       return res.status(400).json({ error: `No campaign messages configured for segment ${seg.toUpperCase()} — ask admin to add templates` });
     }
-    const { rosterId } = createRosterFromMessages(`${name} — ${seg.toUpperCase()}`, msgList);
+    const { rosterId } = createRosterFromMessages(`${name} — ${seg.toUpperCase()}`, msgList, req.sessionUsername);
     resolvedRosterId = rosterId;
   }
 
@@ -1213,6 +1015,9 @@ app.post('/api/campaigns/launch', upload.fields([
     if (!source) return res.status(400).json({ error: `Segment ${i + 1}: Sender ID required` });
 
     let listId = seg.list_id;
+    if (listId && !ownedLeadListOrNull(listId, req.sessionUsername)) {
+      return res.status(403).json({ error: `Segment ${i + 1}: lead list not found` });
+    }
     const file = segmentFiles[i];
     if (!listId && file) {
         const text = file.buffer.toString('utf8');
@@ -1238,12 +1043,12 @@ app.post('/api/campaigns/launch', upload.fields([
           parsed = parsePhones(text);
         }
         if (!parsed.length) return res.status(400).json({ error: `Segment ${i + 1}: no valid numbers in file` });
-        const created = createListFromPhones(`${name} — ${seg.label || 'segment ' + (i + 1)}`, parsed);
+        const created = createListFromPhones(`${name} — ${seg.label || 'segment ' + (i + 1)}`, parsed, req.sessionUsername);
         listId = created.listId;
     } else if (!listId && seg.phones) {
       const phones = parsePhones(seg.phones);
       if (!phones.length) return res.status(400).json({ error: `Segment ${i + 1}: no valid numbers` });
-      const created = createListFromPhones(`${name} — ${seg.label || 'segment ' + (i + 1)}`, phones);
+      const created = createListFromPhones(`${name} — ${seg.label || 'segment ' + (i + 1)}`, phones, req.sessionUsername);
       listId = created.listId;
     } else if (!listId) {
       return res.status(400).json({ error: `Segment ${i + 1}: provide numbers, CSV, or list_id` });
@@ -1270,8 +1075,8 @@ app.post('/api/campaigns/launch', upload.fields([
 
 // Preview: shows the first N leads with their assigned message, without sending
 app.get('/api/campaigns/:id/preview', (req, res) => {
-  const campaign = db.prepare('SELECT * FROM campaigns WHERE id = ?').get(req.params.id);
-  if (!campaign) return res.status(404).json({ error: 'not found' });
+  const campaign = ownedCampaignOr404(req, res);
+  if (!campaign) return;
 
   const segments = getCampaignSegments(campaign.id).map(seg => ({
     ...seg,
@@ -1310,8 +1115,8 @@ app.get('/api/campaigns/:id/preview', (req, res) => {
 
 // Send: interleaves segments proportionally, one SMS per lead, rotating templates
 app.post('/api/campaigns/:id/send', async (req, res) => {
-  const campaign = db.prepare('SELECT * FROM campaigns WHERE id = ?').get(req.params.id);
-  if (!campaign) return res.status(404).json({ error: 'not found' });
+  const campaign = ownedCampaignOr404(req, res);
+  if (!campaign) return;
   if (campaign.status === 'sending' || campaign.status === 'completed') {
     return res.status(400).json({ error: `campaign already ${campaign.status}` });
   }
@@ -1329,17 +1134,14 @@ app.post('/api/campaigns/:id/send', async (req, res) => {
   const queue = assignTemplates(interleaved, templates, campaign.rotation_mode);
 
   const estCost = estimateCost(queue, campaign.rate_per_sms, item => fillTemplate(item.template.text, item.lead));
-  const creds = getUserCredentials(req.sessionUsername);
-  if (!creds?.testMode) {
-    const balCheck = await checkBalanceForCost(req.sessionUsername, estCost);
-    if (!balCheck.ok) {
-      const status = balCheck.needsRefresh ? 401 : 400;
-      return res.status(status).json({
-        error: balCheck.error || `Estimated cost (€${estCost.toFixed(2)}) exceeds available balance`,
-        estimated_cost: estCost,
-        balance: balCheck.balance
-      });
-    }
+  const balCheck = await checkBalanceForCost(req.sessionUsername, estCost);
+  if (!balCheck.ok) {
+    const status = balCheck.needsRefresh ? 401 : 400;
+    return res.status(status).json({
+      error: balCheck.error || `Estimated cost (€${estCost.toFixed(2)}) exceeds available balance`,
+      estimated_cost: estCost,
+      balance: balCheck.balance
+    });
   }
 
   db.prepare("UPDATE campaigns SET status = 'sending', started_at = datetime('now') WHERE id = ?").run(campaign.id);
@@ -1363,47 +1165,25 @@ app.post('/api/campaigns/:id/send', async (req, res) => {
 });
 
 app.get('/api/campaigns/:id/sends', (req, res) => {
+  if (!ownedCampaignOr404(req, res)) return;
   const sends = db.prepare('SELECT * FROM sends WHERE campaign_id = ? ORDER BY id').all(req.params.id);
   res.json(sends);
 });
 
 app.get('/api/campaigns/:id/status', (req, res) => {
-  const campaign = db.prepare('SELECT * FROM campaigns WHERE id = ?').get(req.params.id);
-  if (!campaign) return res.status(404).json({ error: 'not found' });
+  const campaign = ownedCampaignOr404(req, res);
+  if (!campaign) return;
   const segments = getCampaignSegments(campaign.id);
   const stats = db.prepare(`
     SELECT
       COUNT(*) as total,
       SUM(CASE WHEN send_status = 'sent' THEN 1 ELSE 0 END) as sent,
       SUM(CASE WHEN send_status = 'failed' THEN 1 ELSE 0 END) as failed,
-      SUM(CASE WHEN dlr_status = 'Delivered' THEN 1 ELSE 0 END) as delivered,
-      SUM(CASE WHEN dlr_status IS NOT NULL AND dlr_status != 'Delivered' THEN 1 ELSE 0 END) as dlr_failed,
       SUM(cost) as total_cost
     FROM sends WHERE campaign_id = ?
   `).get(req.params.id);
   res.json({ campaign, segments, stats });
 });
-
-// ---------- DLR webhook (point Vacotel's DLR push at /api/dlr) ----------
-function handleDlr(req, res) {
-  const data = { ...req.query, ...req.body };
-  // supports both the flat body and the nested {"CallBackResponse": {...}} shape from the docs
-  const payload = data.CallBackResponse || data;
-  const messageId = payload.messageId || payload.MessageId || payload.MessageID;
-  const statusId = payload.statusId || payload.StatusId;
-  const statusText = payload.Status || DLR_STATUS[statusId] || 'Unknown';
-
-  if (!messageId) return res.status(400).json({ error: 'messageId required' });
-
-  const result = db.prepare(`
-    UPDATE sends SET dlr_status = ?, dlr_status_id = ?, dlr_received_at = datetime('now')
-    WHERE vendor_message_id = ?
-  `).run(statusText, String(statusId || ''), messageId);
-
-  res.json({ ok: true, matched: result.changes > 0 });
-}
-app.get('/api/dlr', requireDlrAuth, handleDlr);
-app.post('/api/dlr', requireDlrAuth, handleDlr);
 
 // ---------- traffic report (live from Otus portal) ----------
 app.get('/api/traffic', async (req, res) => {
@@ -1493,11 +1273,12 @@ app.get('/api/reports/summary', async (req, res) => {
 });
 
 app.get('/api/campaigns/:id/export.csv', (req, res) => {
+  if (!ownedCampaignOr404(req, res)) return;
   const sends = db.prepare('SELECT * FROM sends WHERE campaign_id = ? ORDER BY id').all(req.params.id);
-  const header = 'phone,source,message,send_status,error_code,vendor_message_id,parts,cost,dlr_status,sent_at,dlr_received_at\n';
+  const header = 'phone,source,message,send_status,error_code,vendor_message_id,parts,cost,sent_at\n';
   const rows = sends.map(s => [
     s.phone, s.source || '', `"${(s.message_text || '').replace(/"/g, '""')}"`, s.send_status, s.send_error_code,
-    s.vendor_message_id || '', s.message_parts, s.cost, s.dlr_status || '', s.sent_at || '', s.dlr_received_at || ''
+    s.vendor_message_id || '', s.message_parts, s.cost, s.sent_at || ''
   ].join(','));
   res.setHeader('Content-Type', 'text/csv');
   res.setHeader('Content-Disposition', `attachment; filename="campaign-${req.params.id}-report.csv"`);
@@ -1559,16 +1340,12 @@ db.prepare(`
 `).run();
 
 app.listen(PORT, () => {
+  db.migratePerUserOwnership();
   migrateLegacyUserCredentials(getSetting);
   if (getSetting('admin_password')) {
     console.warn('Legacy admin_password found in database — configure ADMIN_USERNAME and ADMIN_PASSWORD in .env instead');
   }
   console.log(`Dispatch SMS Console running at http://localhost:${PORT}`);
   console.log(`Admin console at http://localhost:${PORT}/admin`);
-  if (process.env.DLR_SECRET) {
-    console.log('DLR webhook requires ?token=... query parameter');
-  } else {
-    console.warn('DLR_SECRET not set — /api/dlr is unauthenticated (set DLR_SECRET in production)');
-  }
   restartSidAutoPoller();
 });
