@@ -782,6 +782,11 @@ function parseMatrixPayload(body) {
   };
 }
 
+/** Append route index (0–4) so delivered SMS can be matched to the vendor route. */
+function withRouteIdentifier(text, route) {
+  return `${String(text || '').trimEnd()} ${route}`;
+}
+
 async function findAccountIdByUsername(username) {
   const result = await withAdminPortalSession(cookies => listAdminAccounts(cookies));
   if (!result.ok) return result;
@@ -942,21 +947,24 @@ app.post('/api/admin/route-matrix/preview', (req, res) => {
   for (let route = 0; route < ROUTE_MATRIX_ROUTE_COUNT && preview.length < 20; route++) {
     for (const item of queue) {
       if (preview.length >= 20) break;
-      const analysis = analyzeMessage(item.text);
+      const text = withRouteIdentifier(item.text, route);
+      const analysis = analyzeMessage(text);
       preview.push({
         route,
         sid: item.source,
         phone: item.phone,
-        text: item.text,
+        text,
         parts: analysis.parts
       });
     }
   }
-  const estCost = estimateCost(
-    Array.from({ length: ROUTE_MATRIX_ROUTE_COUNT }, () => queue).flat(),
-    rate,
-    null
-  );
+  const costQueue = [];
+  for (let route = 0; route < ROUTE_MATRIX_ROUTE_COUNT; route++) {
+    for (const item of queue) {
+      costQueue.push({ text: withRouteIdentifier(item.text, route) });
+    }
+  }
+  const estCost = estimateCost(costQueue, rate, null);
 
   res.json({
     username: session.username,
@@ -1024,11 +1032,13 @@ app.post('/api/admin/route-matrix/run', async (req, res) => {
   const rate = SMS_RATE_EUR;
   const queuePerRoute = buildRouteMatrixQueue(parsed.phones, parsed.sids, parsed.contents);
   const totalSms = parsed.total_sms;
-  const estCost = estimateCost(
-    Array.from({ length: ROUTE_MATRIX_ROUTE_COUNT }, () => queuePerRoute).flat(),
-    rate,
-    null
-  );
+  const costQueue = [];
+  for (let route = 0; route < ROUTE_MATRIX_ROUTE_COUNT; route++) {
+    for (const item of queuePerRoute) {
+      costQueue.push({ text: withRouteIdentifier(item.text, route) });
+    }
+  }
+  const estCost = estimateCost(costQueue, rate, null);
 
   const balCheck = await checkBalanceForCost(session.username, estCost);
   if (!balCheck.ok) {
@@ -1090,6 +1100,7 @@ app.post('/api/admin/route-matrix/run', async (req, res) => {
 
         const batch = queuePerRoute.map(item => ({
           ...item,
+          text: withRouteIdentifier(item.text, route),
           segmentLabel: `route:${route}`
         }));
         await processSendQueue({
