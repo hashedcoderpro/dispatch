@@ -25,7 +25,8 @@ const {
   ERROR_CODES
 } = require('./vacotelClient');
 const {
-  parseLines, parsePhones, buildInterleavedQueue, buildCartesianQueue, assignTemplates, estimateCost
+  parseLines, parsePhones, buildInterleavedQueue, buildCartesianQueue, buildRouteMatrixQueue,
+  assignTemplates, estimateCost
 } = require('./sendHelpers');
 const {
   portalLogin,
@@ -48,6 +49,13 @@ const {
 
 const SMS_RATE_EUR = 0.05;
 const CET_TZ = 'Europe/Paris';
+const ROUTE_MATRIX_ROUTE_COUNT = 5;
+const ROUTE_MATRIX_SETTLE_MS = 1500;
+
+/** adminUsername → { username, accountId, loggedInAt } */
+const routeMatrixSessions = new Map();
+/** Single matrix run lock + progress */
+let routeMatrixRun = null;
 
 function formatParisLocal(ms) {
   return new Intl.DateTimeFormat('sv-SE', {
@@ -618,6 +626,8 @@ app.post('/api/admin/auth/login', adminLoginLimiter, async (req, res) => {
 });
 
 app.post('/api/admin/auth/logout', (req, res) => {
+  const adminUser = verifyAdminSession(req);
+  if (adminUser) routeMatrixSessions.delete(adminUser);
   clearAdminSessionCookie(res);
   res.json({ ok: true });
 });
@@ -694,6 +704,420 @@ app.post('/api/admin/accounts/:id/route', async (req, res) => {
     console.error('Admin route change error:', e);
     res.status(500).json({ error: e.message || 'Route change failed' });
   }
+});
+
+// ---------- admin: route matrix (test portal) ----------
+function getRouteMatrixSession(adminUsername) {
+  return routeMatrixSessions.get(adminUsername) || null;
+}
+
+function requireRouteMatrixSession(req, res) {
+  const session = getRouteMatrixSession(req.adminUsername);
+  if (!session) {
+    res.status(401).json({ error: 'Sign into the test account first' });
+    return null;
+  }
+  if (!hasUserCredentials(session.username)) {
+    routeMatrixSessions.delete(req.adminUsername);
+    res.status(401).json({ error: 'Test account credentials missing — sign in again' });
+    return null;
+  }
+  return session;
+}
+
+function parseMatrixStringList(input, { label, min, max, validateItem }) {
+  let items;
+  if (Array.isArray(input)) {
+    items = input.map(s => String(s || '').trim()).filter(Boolean);
+  } else if (typeof input === 'string') {
+    items = parseLines(input);
+  } else {
+    items = [];
+  }
+  if (items.length < min) return { ok: false, error: `At least ${min} ${label} required` };
+  if (items.length > max) return { ok: false, error: `At most ${max} ${label} allowed` };
+  if (validateItem) {
+    for (const item of items) {
+      const check = validateItem(item);
+      if (!check.ok) return check;
+    }
+    items = items.map(item => validateItem(item).value || item);
+  }
+  return { ok: true, items };
+}
+
+function parseMatrixPayload(body) {
+  const phonesRaw = body.phones ?? body.numbers ?? '';
+  const phoneText = Array.isArray(phonesRaw) ? phonesRaw.join('\n') : String(phonesRaw || '');
+  const phoneLines = parseLines(phoneText);
+  if (phoneLines.length > 3) return { ok: false, error: 'At most 3 phone numbers allowed' };
+  const phones = parsePhones(phoneText);
+  if (!phones.length) return { ok: false, error: 'At least one valid phone number required' };
+  if (phones.length > 3) return { ok: false, error: 'At most 3 phone numbers allowed' };
+
+  const sids = parseMatrixStringList(body.sids, {
+    label: 'SID(s)',
+    min: 1,
+    max: 3,
+    validateItem: validateSenderId
+  });
+  if (!sids.ok) return sids;
+
+  const contents = parseMatrixStringList(body.contents, {
+    label: 'content message(s)',
+    min: 1,
+    max: 3
+  });
+  if (!contents.ok) return contents;
+
+  const perRoute = phones.length * sids.items.length * contents.items.length;
+  const totalSms = perRoute * ROUTE_MATRIX_ROUTE_COUNT;
+  return {
+    ok: true,
+    phones,
+    sids: sids.items,
+    contents: contents.items,
+    per_route: perRoute,
+    total_sms: totalSms
+  };
+}
+
+async function findAccountIdByUsername(username) {
+  const result = await withAdminPortalSession(cookies => listAdminAccounts(cookies));
+  if (!result.ok) return result;
+  const needle = String(username || '').trim().toLowerCase();
+  const acct = (result.accounts || []).find(a =>
+    String(a.Name || '').trim().toLowerCase() === needle ||
+    String(a.Username || '').trim().toLowerCase() === needle
+  );
+  if (!acct) {
+    return { ok: false, error: `No Otus admin account found named "${username}" — check Accounts list` };
+  }
+  return { ok: true, accountId: Number(acct.AccountId), account: acct };
+}
+
+app.post('/api/admin/route-matrix/login', async (req, res) => {
+  const username = String(req.body.username || '').trim();
+  const password = String(req.body.password || '');
+  const apiId = String(req.body.apiId || req.body.api_id || '').trim();
+  if (!username || !password || !apiId) {
+    return res.status(400).json({ error: 'Username, password, and API token are all required' });
+  }
+
+  try {
+    const probe = await probeVacotelApi({
+      baseUrl: VACOTEL_GATEWAY_URL,
+      username,
+      apiId
+    });
+    const check = validateVacotelCredentials(probe);
+    if (!check.ok) {
+      return res.status(401).json({ error: `API token check failed: ${check.error}` });
+    }
+
+    const portal = await portalLogin(username, password);
+    if (!portal.ok) {
+      return res.status(401).json({ error: `Portal login failed: ${portal.error}` });
+    }
+
+    const accountLookup = await findAccountIdByUsername(username);
+    if (accountLookup.needsRefresh) return res.status(401).json({ error: accountLookup.error });
+    if (!accountLookup.ok) return res.status(400).json({ error: accountLookup.error });
+
+    upsertUserCredentials(username, {
+      password,
+      apiId,
+      portalCookies: portal.cookies
+    });
+
+    routeMatrixSessions.set(req.adminUsername, {
+      username,
+      accountId: accountLookup.accountId,
+      loggedInAt: Date.now()
+    });
+
+    res.json({
+      ok: true,
+      username,
+      account_id: accountLookup.accountId,
+      balance: accountLookup.account?.Balance
+    });
+  } catch (e) {
+    console.error('Route matrix login error:', e);
+    res.status(500).json({ error: e.message || 'Test account login failed' });
+  }
+});
+
+app.post('/api/admin/route-matrix/logout', (req, res) => {
+  routeMatrixSessions.delete(req.adminUsername);
+  res.json({ ok: true });
+});
+
+app.get('/api/admin/route-matrix/session', (req, res) => {
+  const session = getRouteMatrixSession(req.adminUsername);
+  if (!session) return res.json({ authenticated: false });
+  res.json({
+    authenticated: true,
+    username: session.username,
+    account_id: session.accountId,
+    logged_in_at: session.loggedInAt
+  });
+});
+
+app.get('/api/admin/route-matrix/sender-ids', async (req, res) => {
+  const session = requireRouteMatrixSession(req, res);
+  if (!session) return;
+  try {
+    const result = await withPortalSession(session.username, async (cookies) => {
+      const list = await listSenderIds(cookies);
+      if (!list.ok && portalSessionExpired(list.status, list.error)) {
+        return { needsRefresh: true };
+      }
+      return list;
+    });
+    if (result.needsRefresh) {
+      return res.status(401).json({ error: 'Test account portal session expired — sign in again' });
+    }
+    if (!result.ok) {
+      return res.status(502).json({ error: result.error || 'Could not load sender IDs' });
+    }
+    res.json({
+      otus: result.items.map(item => ({
+        otus_sender_id: item.SenderId,
+        source: item.Sender,
+        status: item.Status,
+        active: item.Active,
+        created_date: item.CreatedDate
+      }))
+    });
+  } catch (e) {
+    console.error('Route matrix SIDs error:', e);
+    res.status(500).json({ error: e.message || 'Failed to load sender IDs' });
+  }
+});
+
+app.post('/api/admin/route-matrix/sender-ids/request', async (req, res) => {
+  const session = requireRouteMatrixSession(req, res);
+  if (!session) return;
+  const source = String(req.body.source || '').trim();
+  const check = validateSenderId(source);
+  if (!check.ok) return res.status(400).json({ error: check.error });
+
+  try {
+    const result = await withPortalSession(session.username, async (cookies) => {
+      const out = await requestSenderId(cookies, source);
+      if (!out.ok && /login|session|unauthorized/i.test(out.error || '')) {
+        return { needsRefresh: true };
+      }
+      return out;
+    });
+    if (result.needsRefresh) {
+      return res.status(401).json({ error: 'Test account portal session expired — sign in again' });
+    }
+    if (!result.ok) {
+      return res.status(400).json({ error: result.error || 'SID request failed' });
+    }
+
+    db.prepare(`
+      INSERT INTO sender_id_requests (requested_by, source, otus_sender_id, status, description, updated_at)
+      VALUES (?, ?, ?, 'pending', ?, datetime('now'))
+    `).run(session.username, check.value, result.senderId || null, result.description || 'Submitted to Vacotel for approval');
+
+    res.json({ ok: true, source: check.value, sender_id: result.senderId, description: result.description });
+  } catch (e) {
+    console.error('Route matrix SID request error:', e);
+    res.status(500).json({ error: e.message || 'SID request failed' });
+  }
+});
+
+app.post('/api/admin/route-matrix/preview', (req, res) => {
+  const session = requireRouteMatrixSession(req, res);
+  if (!session) return;
+  const parsed = parseMatrixPayload(req.body || {});
+  if (!parsed.ok) return res.status(400).json({ error: parsed.error });
+
+  const queue = buildRouteMatrixQueue(parsed.phones, parsed.sids, parsed.contents);
+  const rate = SMS_RATE_EUR;
+  const preview = [];
+  for (let route = 0; route < ROUTE_MATRIX_ROUTE_COUNT && preview.length < 20; route++) {
+    for (const item of queue) {
+      if (preview.length >= 20) break;
+      const analysis = analyzeMessage(item.text);
+      preview.push({
+        route,
+        sid: item.source,
+        phone: item.phone,
+        text: item.text,
+        parts: analysis.parts
+      });
+    }
+  }
+  const estCost = estimateCost(
+    Array.from({ length: ROUTE_MATRIX_ROUTE_COUNT }, () => queue).flat(),
+    rate,
+    null
+  );
+
+  res.json({
+    username: session.username,
+    account_id: session.accountId,
+    phone_count: parsed.phones.length,
+    sid_count: parsed.sids.length,
+    content_count: parsed.contents.length,
+    routes: ROUTE_MATRIX_ROUTE_COUNT,
+    per_route: parsed.per_route,
+    total_sms: parsed.total_sms,
+    estimated_cost: estCost,
+    rate_per_sms: rate,
+    preview
+  });
+});
+
+app.get('/api/admin/route-matrix/status', (req, res) => {
+  if (!routeMatrixRun) {
+    return res.json({ running: false, run: null });
+  }
+  res.json({
+    running: routeMatrixRun.status === 'running',
+    run: {
+      campaign_id: routeMatrixRun.campaignId,
+      status: routeMatrixRun.status,
+      username: routeMatrixRun.username,
+      current_route: routeMatrixRun.currentRoute,
+      sent: routeMatrixRun.sent,
+      total_sms: routeMatrixRun.totalSms,
+      error: routeMatrixRun.error || null,
+      started_at: routeMatrixRun.startedAt,
+      finished_at: routeMatrixRun.finishedAt || null
+    }
+  });
+});
+
+app.get('/api/admin/route-matrix/results/:campaignId', (req, res) => {
+  const campaignId = Number(req.params.campaignId);
+  if (!campaignId) return res.status(400).json({ error: 'Valid campaign id required' });
+  const campaign = db.prepare('SELECT * FROM campaigns WHERE id = ?').get(campaignId);
+  if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
+  const sends = db.prepare(`
+    SELECT id, phone, message_text, source, segment_label, send_status, send_error_code, cost, sent_at
+    FROM sends WHERE campaign_id = ? ORDER BY id ASC
+  `).all(campaignId);
+  const stats = {
+    total: sends.length,
+    sent: sends.filter(s => s.send_status === 'sent').length,
+    failed: sends.filter(s => s.send_status === 'failed').length
+  };
+  res.json({ campaign, sends, stats });
+});
+
+app.post('/api/admin/route-matrix/run', async (req, res) => {
+  const session = requireRouteMatrixSession(req, res);
+  if (!session) return;
+  if (routeMatrixRun && routeMatrixRun.status === 'running') {
+    return res.status(409).json({ error: 'A route matrix run is already in progress' });
+  }
+
+  const parsed = parseMatrixPayload(req.body || {});
+  if (!parsed.ok) return res.status(400).json({ error: parsed.error });
+
+  const throttleMs = parseInt(req.body.throttle_ms) || 300;
+  const rate = SMS_RATE_EUR;
+  const queuePerRoute = buildRouteMatrixQueue(parsed.phones, parsed.sids, parsed.contents);
+  const totalSms = parsed.total_sms;
+  const estCost = estimateCost(
+    Array.from({ length: ROUTE_MATRIX_ROUTE_COUNT }, () => queuePerRoute).flat(),
+    rate,
+    null
+  );
+
+  const balCheck = await checkBalanceForCost(session.username, estCost);
+  if (!balCheck.ok) {
+    const status = balCheck.needsRefresh ? 401 : 400;
+    return res.status(status).json({
+      error: balCheck.error,
+      estimated_cost: estCost,
+      balance: balCheck.balance
+    });
+  }
+
+  const { listId } = createListFromPhones(
+    `Route Matrix ${session.username} ${new Date().toISOString().slice(0, 16)}`,
+    parsed.phones,
+    session.username
+  );
+  const leadRows = db.prepare('SELECT id, phone FROM leads WHERE list_id = ?').all(listId);
+  const phoneToLeadId = Object.fromEntries(leadRows.map(l => [l.phone, l.id]));
+  const info = db.prepare(`
+    INSERT INTO campaigns (name, list_id, roster_id, source, rotation_mode, status, rate_per_sms, throttle_ms, started_at, created_by)
+    VALUES (?, ?, 0, ?, 'sequential', 'sending', ?, ?, datetime('now'), ?)
+  `).run(
+    `Route Matrix ${session.username} ${new Date().toLocaleString()}`,
+    listId,
+    parsed.sids.join(','),
+    rate,
+    throttleMs,
+    session.username
+  );
+  const campaignId = info.lastInsertRowid;
+
+  routeMatrixRun = {
+    campaignId,
+    status: 'running',
+    username: session.username,
+    accountId: session.accountId,
+    adminUsername: req.adminUsername,
+    currentRoute: 0,
+    sent: 0,
+    totalSms,
+    error: null,
+    startedAt: Date.now(),
+    finishedAt: null
+  };
+
+  res.json({ ok: true, campaign_id: campaignId, total_sms: totalSms, estimated_cost: estCost });
+
+  (async () => {
+    try {
+      for (let route = 0; route < ROUTE_MATRIX_ROUTE_COUNT; route++) {
+        routeMatrixRun.currentRoute = route;
+        const routeResult = await withAdminPortalSession(cookies =>
+          changeAccountRoute(cookies, session.accountId, route)
+        );
+        if (routeResult.needsRefresh || !routeResult.ok) {
+          throw new Error(routeResult.error || `Failed to set route ${route}`);
+        }
+        await new Promise(r => setTimeout(r, ROUTE_MATRIX_SETTLE_MS));
+
+        const batch = queuePerRoute.map(item => ({
+          ...item,
+          segmentLabel: `route:${route}`
+        }));
+        await processSendQueue({
+          username: session.username,
+          queue: batch,
+          campaignId,
+          ratePerSms: rate,
+          throttleMs,
+          getText: item => item.text,
+          getPhone: item => item.phone,
+          getSource: item => item.source,
+          getLeadId: item => phoneToLeadId[item.phone] ?? leadRows[0]?.id,
+          getTemplateId: () => null,
+          notePrefix: `Route matrix #${campaignId} route:${route}`
+        });
+        routeMatrixRun.sent += batch.length;
+      }
+      db.prepare("UPDATE campaigns SET status = 'completed', completed_at = datetime('now') WHERE id = ?").run(campaignId);
+      routeMatrixRun.status = 'completed';
+      routeMatrixRun.finishedAt = Date.now();
+    } catch (e) {
+      console.error('Route matrix run error:', e);
+      db.prepare("UPDATE campaigns SET status = 'draft', completed_at = NULL WHERE id = ?").run(campaignId);
+      routeMatrixRun.status = 'failed';
+      routeMatrixRun.error = e.message || String(e);
+      routeMatrixRun.finishedAt = Date.now();
+    }
+  })();
 });
 
 app.get('/api/admin/templates', (req, res) => {

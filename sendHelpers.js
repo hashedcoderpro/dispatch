@@ -68,6 +68,19 @@ function buildCartesianQueue(phones, messages) {
   return queue;
 }
 
+/** Per route: SID → content → phone (same nesting as the Route Matrix UI). */
+function buildRouteMatrixQueue(phones, sids, contents) {
+  const queue = [];
+  for (const source of sids) {
+    for (const text of contents) {
+      for (const phone of phones) {
+        queue.push({ phone, text, source });
+      }
+    }
+  }
+  return queue;
+}
+
 function assignTemplates(queue, templates, rotationMode) {
   return queue.map((item, i) => {
     const tpl = rotationMode === 'random'
@@ -91,6 +104,7 @@ module.exports = {
   parsePhones,
   buildInterleavedQueue,
   buildCartesianQueue,
+  buildRouteMatrixQueue,
   assignTemplates,
   estimateCost
 };
